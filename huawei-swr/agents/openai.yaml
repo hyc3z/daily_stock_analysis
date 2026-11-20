@@ -1,0 +1,4 @@
+interface:
+  display_name: "华为云与 SWR 镜像库"
+  short_description: "从账号注册到镜像推送、权限分配和 K3s 拉取的中文操作教程"
+  default_prompt: "使用 $huawei-swr 带我注册华为云账号、配置 SWR，并接入我的构建和部署流程。"

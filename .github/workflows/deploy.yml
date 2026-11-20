@@ -1,15 +1,15 @@
 name: deploy
 
-# Build on a GitHub runner, push to GHCR with the automatic GITHUB_TOKEN (no
-# long-lived registry credentials), then trigger the restricted deploy entry on
-# the server over SSH.
+# Build on a GitHub runner, push to Huawei SWR, then trigger the restricted
+# deploy entry on the server over SSH. SWR is used because the server reaches it
+# fast (in-China), while GHCR/Docker Hub are effectively unreachable from it.
 #
-# The only repository secret this needs is DSA_DEPLOY_SSH_KEY, whose public half
-# is locked to command="/usr/local/bin/agent-ops-gh-deploy-dsa",restrict.
-#
-# After the first successful push the package must be made Public once
-# (repo -> Packages -> daily_stock_analysis -> settings -> Change visibility),
-# so the server can pull it anonymously.
+# Repository secrets:
+#   SWR_USERNAME / SWR_PASSWORD   from SWR -> Login Command -> long-term command
+#                                 generated with the CI IAM user's AK/SK
+#                                 (username keeps its region prefix, e.g. cn-north-4@...)
+#   DSA_DEPLOY_SSH_KEY            private key locked to
+#                                 command="/usr/local/bin/agent-ops-gh-deploy-dsa",restrict
 on:
   push:
     branches: [main]
@@ -20,32 +20,37 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  IMAGE: ghcr.io/hyc3z/daily_stock_analysis
+  REGISTRY: swr.cn-north-4.myhuaweicloud.com
+  IMAGE: swr.cn-north-4.myhuaweicloud.com/agent-playground/dsa
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Log in to GHCR
+      - name: Log in to SWR
         uses: docker/login-action@v3
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.SWR_USERNAME }}
+          password: ${{ secrets.SWR_PASSWORD }}
 
+      # Docker media types (not OCI) plus no provenance/SBOM: this is the export
+      # form the existing SWR repositories were verified with.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: docker/Dockerfile
-          push: true
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          outputs: type=image,push=true,oci-mediatypes=false
           tags: ${{ env.IMAGE }}:${{ github.sha }}
           build-args: |
             DSA_WEB_VERSION=${{ github.sha }}
@@ -60,7 +65,6 @@ jobs:
     steps:
       - name: SSH deploy
         env:
-          # Not a secret: the same public IP serves the domain.
           HOST: 124.223.8.213
           PORT: 22
           USER: ubuntu
@@ -71,12 +75,12 @@ jobs:
           printf '%s\n' "${{ secrets.DSA_DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "$PORT" -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          # Keepalives ride out the idle window while the server pulls a large image.
+          # The server pulls a large image inside this session; keepalives plus a
+          # server-side detached unit keep the deploy alive across idle windows.
           ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=40 \
             -p "$PORT" "$USER@$HOST" "deploy $SHA"
 
       - name: Verify site
-        # Tolerated until the Caddy site block is in place.
         run: |
           curl -fsS -o /dev/null -w 'site https=%{http_code}\n' https://stock.qianxue.online/ \
             || echo "verify skipped: site not wired up yet"
