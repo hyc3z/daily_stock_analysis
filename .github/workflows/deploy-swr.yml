@@ -59,9 +59,10 @@ jobs:
     steps:
       - name: SSH deploy
         env:
-          HOST: ${{ secrets.DEPLOY_HOST }}
-          PORT: ${{ secrets.DEPLOY_PORT || '22' }}
-          USER: ${{ secrets.DEPLOY_USER }}
+          # Target host is not a secret: it is the same public IP that serves the domain.
+          HOST: 124.223.8.213
+          PORT: 22
+          USER: ubuntu
           SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
