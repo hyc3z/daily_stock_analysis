@@ -18,10 +18,12 @@ import time
 from dataclasses import dataclass
 from typing import Optional, Dict, Any, List, Tuple, Callable, Union
 
-import litellm
 from json_repair import repair_json
-from litellm import Router
 
+# ``import litellm`` 单独就要 ~208MB RSS（实测）。这里改成惰性导入：只有真正发起
+# LLM 调用时才会加载，Web/API 空闲进程因此少占约 200MB。``litellm.completion``
+# 与 ``Router(...)`` 的用法保持不变。
+from src.llm.lazy_litellm import Router, litellm
 from src.agent.llm_adapter import (
     get_thinking_extra_body,
     resolve_fallback_litellm_wire_models,

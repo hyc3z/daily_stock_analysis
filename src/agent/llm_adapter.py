@@ -14,8 +14,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-import litellm
-from litellm import Router
+# 惰性导入 litellm（~208MB RSS），详见 src/llm/lazy_litellm.py。
+from src.llm.lazy_litellm import Router, litellm
 
 from src.config import (
     extra_litellm_params,
@@ -58,7 +58,8 @@ logger = logging.getLogger(__name__)
 # streaming chunk 向全局线程池提交一次 asyncio.run() 日志任务；Windows 上每次都会新建
 # Proactor 事件循环和回环 socketpair，长报告产生数千次，既耗 CPU，又会让线程池卡在
 # socketpair 的 accept() 上，导致 CLI 打印「程序执行完成」后进程无法退出。
-litellm.disable_streaming_logging = True
+# 该开关现在由 src.llm.lazy_litellm.get_litellm() 在真正导入 litellm 时设置，
+# 避免模块级赋值提前触发约 208MB 的导入。
 
 
 def _resolve_litellm_exception(name: str) -> type[BaseException]:
