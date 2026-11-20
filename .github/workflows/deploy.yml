@@ -71,7 +71,9 @@ jobs:
           printf '%s\n' "${{ secrets.DSA_DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -p "$PORT" -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -p "$PORT" "$USER@$HOST" "deploy $SHA"
+          # Keepalives ride out the idle window while the server pulls a large image.
+          ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=40 \
+            -p "$PORT" "$USER@$HOST" "deploy $SHA"
 
       - name: Verify site
         # Tolerated until the Caddy site block is in place.
