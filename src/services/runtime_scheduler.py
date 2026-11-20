@@ -31,6 +31,8 @@ DEFAULT_RUNTIME_SCHEDULER_TIMEOUT_SECONDS = 45 * 60
 # 定时分析结束后是否让服务自我重启以释放父进程保留的内存（默认关闭）。
 RESTART_AFTER_SCHEDULED_RUN_ENV = "DSA_RESTART_AFTER_SCHEDULED_RUN"
 RESTART_AFTER_SCHEDULED_RUN_DELAY_ENV = "DSA_RESTART_AFTER_SCHEDULED_RUN_DELAY_SECONDS"
+# 若进程在 SIGTERM 后仍未退出（自定义信号处理），多少秒后强制退出。
+RESTART_AFTER_SCHEDULED_RUN_HARD_EXIT_ENV = "DSA_RESTART_AFTER_SCHEDULED_RUN_HARD_EXIT_SECONDS"
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
     "no_notify",
@@ -639,8 +641,21 @@ class RuntimeSchedulerService:
                 # SIGTERM lets uvicorn shut down gracefully; the container's
                 # Restart=always policy then brings a fresh process back.
                 os.kill(os.getpid(), signal.SIGTERM)
-            except Exception:  # pragma: no cover - fall back to a hard exit
-                os._exit(0)
+            except Exception:  # pragma: no cover - fall through to the hard exit
+                pass
+            # Some entrypoints install their own SIGTERM handler that keeps
+            # serving (measured: RestartCount stayed 0). Guarantee the restart
+            # instead of silently doing nothing.
+            try:
+                hard_delay = float(os.getenv(RESTART_AFTER_SCHEDULED_RUN_HARD_EXIT_ENV, "20") or 20)
+            except (TypeError, ValueError):
+                hard_delay = 20.0
+            time.sleep(max(0.0, min(300.0, hard_delay)))
+            logger.warning(
+                "Service still alive %.0fs after SIGTERM; forcing exit to restart",
+                hard_delay,
+            )
+            os._exit(0)
 
         timer = threading.Timer(delay, _exit_for_restart)
         timer.daemon = True

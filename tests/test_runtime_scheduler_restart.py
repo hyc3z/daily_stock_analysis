@@ -71,3 +71,29 @@ def test_manual_runs_do_not_restart(monkeypatch):
                 _scheduler_without_init()._maybe_restart_after_scheduled_run()
     gate.assert_not_called()
     timer.assert_not_called()
+
+def test_restart_callback_forces_exit_when_sigterm_does_not_stop_the_process(monkeypatch):
+    """Measured in production: SIGTERM was swallowed (RestartCount stayed 0)."""
+
+    captured = {}
+
+    class _FakeTimer:
+        def __init__(self, delay, fn):
+            captured["fn"] = fn
+
+        def start(self):
+            captured["started"] = True
+
+    monkeypatch.setenv(RESTART_AFTER_SCHEDULED_RUN_ENV, "1")
+    with patch("src.services.runtime_scheduler.threading.Timer", _FakeTimer):
+        _scheduler_without_init()._maybe_restart_after_scheduled_run()
+    assert captured.get("started") is True
+
+    with patch("src.services.runtime_scheduler.os.kill") as kill, \
+            patch("src.services.runtime_scheduler.time.sleep") as sleep, \
+            patch("src.services.runtime_scheduler.os._exit") as hard_exit:
+        captured["fn"]()
+
+    kill.assert_called_once()
+    sleep.assert_called_once()
+    hard_exit.assert_called_once_with(0)
