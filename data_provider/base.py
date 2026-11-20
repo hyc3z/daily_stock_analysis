@@ -26,7 +26,11 @@ import pandas as pd
 import numpy as np
 from src.data.stock_index_loader import get_index_stock_name
 from src.data.stock_mapping import STOCK_NAME_MAP, is_meaningful_stock_name
-from src.services.market_symbol_utils import is_crypto_symbol, is_suffix_market_symbol
+from src.services.market_symbol_utils import (
+    is_crypto_symbol,
+    is_suffix_market_symbol,
+    normalize_crypto_symbol,
+)
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
 from src.services.stock_list_parser import AnalysisTarget, ParseStatus, parse_analysis_target
 from .fundamental_adapter import AkshareFundamentalAdapter
@@ -244,7 +248,11 @@ def _is_meaningful_chip_distribution(chip: Any) -> bool:
 
 
 def _market_tag(code: str) -> str:
-    """返回市场标签: cn/us/hk/jp/kr/tw."""
+    """返回市场标签: cn/us/hk/jp/kr/tw/crypto."""
+    # 虚拟货币必须最先判定：``BTC-USDT``/``BTCUSDT`` 不匹配任何股票市场规则，
+    # 否则会落到 ``cn`` 兜底，触发 A 股专属能力（板块/筹码/基本面）的无谓探测。
+    if is_crypto_symbol(code):
+        return "crypto"
     if _is_us_market(code):
         return "us"
     if _is_hk_market(code):
@@ -3064,6 +3072,12 @@ class DataFetcherManager:
         Returns:
             ChipDistribution 对象，失败则返回 None
         """
+        # 筹码分布是 A 股专属能力（东财/同花顺口径），虚拟货币没有对应数据；
+        # 直接短路，避免逐个数据源试错造成的耗时与误导性错误日志。
+        if is_crypto_symbol(stock_code):
+            logger.debug("[筹码分布] %s 为虚拟货币，跳过股票专属能力", stock_code)
+            return None
+
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
 
@@ -3194,6 +3208,11 @@ class DataFetcherManager:
             return ""
         if target.asset_type == ParseStatus.INDEX:
             return self._get_cn_index_name(target)
+
+        # 虚拟货币没有股票名称体系：直接返回规范交易对，避免逐个数据源探测
+        # （否则会产生「所有数据源都无法获取名称」的误导性告警）。
+        if is_crypto_symbol(raw_stock_code):
+            return normalize_crypto_symbol(raw_stock_code) or raw_stock_code
 
         # Normalize code (strip SH/SZ prefix etc.)
         stock_code = normalize_stock_code(stock_code)
@@ -4424,6 +4443,13 @@ class DataFetcherManager:
         stock_code = normalize_stock_code(stock_code)
         market = _market_tag(stock_code)
         is_etf = _is_etf_code(stock_code)
+        # 虚拟货币没有财报口径：直接返回 not_supported 上下文，避免走 A 股基本面
+        # 链路（baostock/yfinance 会把交易对当成未知市场并告警）。
+        if is_crypto_symbol(stock_code):
+            return self._build_market_not_supported(
+                market="crypto",
+                reason="crypto assets have no financial statements",
+            )
         if market in {"us", "hk", "jp", "kr", "tw"}:
             return self._build_offshore_fundamental_context(
                 stock_code,
