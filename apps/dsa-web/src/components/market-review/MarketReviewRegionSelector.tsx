@@ -5,6 +5,7 @@ import { useUiLanguage } from '../../contexts/UiLanguageContext';
 import { cn } from '../../utils/cn';
 import {
   MARKET_REVIEW_REGION_ORDER,
+  STOCK_MARKET_REVIEW_REGIONS,
   type MarketReviewRegion,
 } from '../../utils/marketReviewRegion';
 
@@ -35,7 +36,13 @@ export const MarketReviewRegionSelector: React.FC<MarketReviewRegionSelectorProp
     jp: t('home.marketRegionJp'),
     kr: t('home.marketRegionKr'),
     tw: t('home.marketRegionTw'),
+    crypto: t('home.marketRegionCrypto'),
   };
+
+  // “全部市场”沿用旧语义 = 六个股票市场（服务端 `both`），crypto 需要单独勾选。
+  const allStockRegionsSelected =
+    displayedRegions.length === STOCK_MARKET_REVIEW_REGIONS.length
+    && STOCK_MARKET_REVIEW_REGIONS.every((region) => displayedRegions.includes(region));
 
   const formatRegions = (regions: MarketReviewRegion[]) => (
     regions.map((region) => regionLabels[region]).join(' + ')
@@ -162,13 +169,13 @@ export const MarketReviewRegionSelector: React.FC<MarketReviewRegionSelectorProp
             <button
               type="button"
               disabled={disabled}
-              aria-pressed={value !== undefined && displayedRegions.length === MARKET_REVIEW_REGION_ORDER.length}
-              onClick={() => onChange([...MARKET_REVIEW_REGION_ORDER])}
+              aria-pressed={value !== undefined && allStockRegionsSelected}
+              onClick={() => onChange([...STOCK_MARKET_REVIEW_REGIONS])}
               className="flex min-h-10 w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left text-sm text-secondary-text transition-colors hover:bg-surface-hover hover:text-foreground focus-visible:ring-2 focus-visible:ring-primary/40 focus-visible:outline-none"
             >
               <span className="flex h-4 w-4 items-center justify-center rounded border border-primary/60 bg-primary/10">
                 <Check
-                  className={cn('h-3 w-3 text-primary', displayedRegions.length === MARKET_REVIEW_REGION_ORDER.length ? 'opacity-100' : 'opacity-0')}
+                  className={cn('h-3 w-3 text-primary', allStockRegionsSelected ? 'opacity-100' : 'opacity-0')}
                   aria-hidden="true"
                 />
               </span>

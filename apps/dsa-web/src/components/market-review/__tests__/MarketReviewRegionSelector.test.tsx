@@ -15,6 +15,11 @@ describe('MarketReviewRegionSelector', () => {
     expect(serializeMarketReviewRegions(['tw', 'cn'])).toBe('cn,tw');
     expect(serializeMarketReviewRegions(['cn', 'hk', 'us', 'jp', 'kr'])).toBe('cn,hk,us,jp,kr');
     expect(serializeMarketReviewRegions(['cn', 'hk', 'us', 'jp', 'kr', 'tw'])).toBe('both');
+    // 虚拟货币必须显式列出：服务端的 `both` 只代表六个股票市场。
+    expect(serializeMarketReviewRegions(['crypto'])).toBe('crypto');
+    expect(serializeMarketReviewRegions(['cn', 'crypto'])).toBe('cn,crypto');
+    expect(serializeMarketReviewRegions(['cn', 'hk', 'us', 'jp', 'kr', 'tw', 'crypto']))
+      .toBe('cn,hk,us,jp,kr,tw,crypto');
   });
 
   it('keeps the runtime-resolved server default opaque and emits a canonical override', () => {
