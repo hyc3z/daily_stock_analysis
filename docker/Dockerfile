@@ -40,6 +40,10 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim-bookworm
 
+# Markdown 转图片（wkhtmltoimage + CJK 字体）默认开启。设 INSTALL_PDF_RENDERER=0
+# 可省约 200MB 镜像；代价是报告/分享图转图不可用，src/md2img.py 会告警降级而不是崩溃。
+ARG INSTALL_PDF_RENDERER=1
+
 # 设置工作目录
 WORKDIR /app
 
@@ -52,12 +56,13 @@ RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gosu \
-    wkhtmltopdf \
-    fontconfig \
-    fonts-noto-cjk \
     libjpeg62-turbo \
     libxrender1 \
     libxext6 \
+    && if [ "$INSTALL_PDF_RENDERER" = "1" ]; then \
+         apt-get install -y --no-install-recommends \
+           wkhtmltopdf fontconfig fonts-noto-cjk; \
+       fi \
     && rm -rf /var/lib/apt/lists/*
 
 # 创建非 root 用户 (UID 1000)

@@ -28,6 +28,9 @@ RUNTIME_SCHEDULER_SUPPRESS_START_ENV = "DSA_RUNTIME_SCHEDULER_SUPPRESS_START"
 RUNTIME_SCHEDULER_ARGS_ENV = "DSA_RUNTIME_SCHEDULER_ARGS"
 RUNTIME_SCHEDULER_TIMEOUT_ENV = "DSA_RUNTIME_SCHEDULER_TIMEOUT_SECONDS"
 DEFAULT_RUNTIME_SCHEDULER_TIMEOUT_SECONDS = 45 * 60
+# 定时分析结束后是否让服务自我重启以释放父进程保留的内存（默认关闭）。
+RESTART_AFTER_SCHEDULED_RUN_ENV = "DSA_RESTART_AFTER_SCHEDULED_RUN"
+RESTART_AFTER_SCHEDULED_RUN_DELAY_ENV = "DSA_RESTART_AFTER_SCHEDULED_RUN_DELAY_SECONDS"
 _RUNTIME_ANALYSIS_LOCK = threading.Lock()
 SCHEDULE_ARGS_OVERRIDE_KEYS = {
     "no_notify",
@@ -599,6 +602,49 @@ class RuntimeSchedulerService:
                 result_queue.close()
             if timeout_partial_context is not None:
                 self._apply_timeout_partial_outcome(timeout_partial_context)
+            if scheduled_for is not None:
+                self._maybe_restart_after_scheduled_run()
+
+    def _maybe_restart_after_scheduled_run(self) -> None:
+        """Release the parent process's retained heap after a scheduled run.
+
+        The analysis itself already runs in a spawned child (so its memory goes
+        away when it exits), but the Web process keeps the pandas/LLM working set
+        it grew while orchestrating a run — measured 340 MB idle vs ~540 MB after
+        a run, and up to 1.1 GB in the container cgroup during it. Restarting the
+        service releases that instead of waiting for a fixed nightly timer.
+
+        Opt-in: ``DSA_RESTART_AFTER_SCHEDULED_RUN=1``. Manual/API runs never
+        restart the process because they pass ``scheduled_for=None``.
+        """
+
+        enabled = (os.getenv(RESTART_AFTER_SCHEDULED_RUN_ENV) or "0").strip().lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            return
+        try:
+            delay = float(os.getenv(RESTART_AFTER_SCHEDULED_RUN_DELAY_ENV, "5") or 5)
+        except (TypeError, ValueError):
+            delay = 5.0
+        delay = max(0.0, min(600.0, delay))
+
+        logger.info(
+            "Scheduled run finished; exiting in %.0fs so the service restarts and "
+            "releases retained memory (%s=1)",
+            delay,
+            RESTART_AFTER_SCHEDULED_RUN_ENV,
+        )
+
+        def _exit_for_restart() -> None:
+            try:
+                # SIGTERM lets uvicorn shut down gracefully; the container's
+                # Restart=always policy then brings a fresh process back.
+                os.kill(os.getpid(), signal.SIGTERM)
+            except Exception:  # pragma: no cover - fall back to a hard exit
+                os._exit(0)
+
+        timer = threading.Timer(delay, _exit_for_restart)
+        timer.daemon = True
+        timer.start()
 
     def _start_analysis_watchdog(
         self,
