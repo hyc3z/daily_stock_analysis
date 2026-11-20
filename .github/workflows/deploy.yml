@@ -76,9 +76,11 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DNSPOD_API_ID: ${{ secrets.DNSPOD_API_ID }}
+          DNSPOD_API_TOKEN: ${{ secrets.DNSPOD_API_TOKEN }}
         run: |
           set -euo pipefail
-          for name in DEEPSEEK_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
+          for name in DEEPSEEK_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID DNSPOD_API_ID DNSPOD_API_TOKEN; do
             value="${!name:-}"
             if [ -z "$value" ]; then echo "$name: not set, skipped"; continue; fi
             printf '%s' "$value" | ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes \
