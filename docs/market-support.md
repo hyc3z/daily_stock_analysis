@@ -147,3 +147,53 @@ Portfolio 允许 JP/KR 账户、交易和持仓快照进入现有链路，但会
 - Web UI 可视证据口径：Market Light 告警目标范围切到“大盘市场”时，市场区域下拉只显示 A 股、港股、美股，不显示日股/韩股；设置页 `MARKET_REVIEW_REGION` 渲染为可输入逗号分隔值的文本框。当前仓库不保存一次性截图证据，可替代证据为 `apps/dsa-web/src/components/alerts/__tests__/AlertRuleForm.test.tsx`、`apps/dsa-web/src/components/settings/__tests__/SettingsField.test.tsx` 和 `apps/dsa-web/tests/system_config_i18n.test.ts` 的断言。
 
 回滚方式：移除 Portfolio snapshot 的 `data_quality` / `limitations` 扩展，恢复告警前端/后端对市场枚举的旧边界说明；如需整体回滚，移除 `jp/kr` 市场识别、交易日历注册、YFinance 路由扩展、Web/API 类型放行、`scripts/stock_index_seeds/` 日韩种子索引，并删除本文档中的能力声明。
+
+## 虚拟货币（加密货币）个股分析
+
+当前阶段支持把虚拟货币交易对写进自选股，进入既有个股分析主链路（日线抓取 → 技术指标 → 新闻/LLM → 报告 → 通知），复用既有策略与报告模板。股票（A 股/港股/美股/日韩台）行为不变：新增识别只覆盖「白名单 base + 白名单 quote」的交易对。
+
+支持格式（大小写不敏感，统一归一为 `BASE-QUOTE` 大写形式）：
+
+- 带分隔符：`BTC-USDT`、`ETH-USDC`、`ETH-BTC`
+- 不带分隔符：`BTCUSDT`、`btcusdt`
+- base 白名单约 60 个主流资产（BTC/ETH/SOL/BNB/XRP/DOGE/ADA/TON/AVAX/LINK/DOT/TRX/LTC/BCH/SHIB/SUI/APT/ARB/OP/NEAR/ATOM/FIL/INJ/SEI/TIA/PEPE/WIF/UNI/AAVE/ETC/XLM/HBAR/ICP/RENDER/FET/AR/IMX/STX/GRT/THETA/ALGO/VET/SAND/MANA/AXS/EOS/FLOW/KSM/ONE/ZIL/IOTA/NEO/DASH/XMR/EGLD/WLD/ONDO/JUP/LDO/CRV/MKR …），quote 白名单为 `USDT/USDC/BUSD/FDUSD/USD/BTC/ETH`。
+- 定义与判定唯一真源：`src/services/market_symbol_utils.py`（`is_crypto_symbol` / `normalize_crypto_symbol` / `crypto_to_binance` / `crypto_to_yahoo`），API、数据源路由、市场上下文、交易日历与市场档案复用同一组函数。
+
+判歧义规则：
+
+- **只有 allowlisted base + allowlisted quote 才算虚拟货币**。裸字母代码（`AAPL`、`SHOP`、`ADA`、`BTC`）即便命中了 base 白名单，只要没有合法 quote，仍按原有股票语义处理（1-5 位字母 → 美股；6 位数字 → A 股）。
+- 因此 `BTC`（币种单位）不会被当成加密货币，`BTC-USDT` / `BTCUSDT` 才是交易对；该规则写进了 `is_crypto_symbol` 的 docstring，并由 `tests/test_crypto_symbols.py` 固化。
+
+数据源与路由：
+
+- 日线与实时行情只走虚拟货币专属数据源，顺序固定 **Binance Vision → Yahoo Finance crypto**，不尝试 AkShare/Tushare/Efinance/Pytdx/Baostock/Tencent/Longbridge/Futu/Finnhub/AlphaVantage 等股票源；反之，A 股链路会显式排除这两个 crypto 源（`DataFetcherManager._CRYPTO_SOURCE_ORDER` / `_exclude_crypto_fetchers`）。
+- `BinanceVisionFetcher`（`data_provider/binance_vision_fetcher.py`）：`https://data-api.binance.vision`，免密钥；`/api/v3/klines`（interval=1d，1000 根/页，按 start/end 分页）→ `date/open/high/low/close/volume/amount/pct_chg`，其中 `amount` 取 quote asset volume；`/api/v3/ticker/24hr` → `UnifiedRealtimeQuote`（price/change_pct/change_amount/open/high/low/pre_close/volume/amount/amplitude/provider_timestamp）。非 200、非 JSON、结构异常一律抛 `DataSourceUnavailableError`，并且每个请求都有显式 timeout。
+- `YahooCryptoFetcher`（`data_provider/yahoo_crypto_fetcher.py`）：继承 `YfinanceFetcher`，把 `BTC-USDT` 映射为 `BTC-USD` 复用其日线/实时实现；命中 Yahoo 限流（`YFRateLimitError` / HTTP 429）时抛带明确说明的 `DataSourceUnavailableError`，其它失败按既有 `DataFetchError`/`None` 语义降级，不中断分析。
+- 相关环境变量：`BINANCE_VISION_PRIORITY`（默认 1）、`BINANCE_VISION_TIMEOUT_SEC`（默认 10）、`YAHOO_CRYPTO_PRIORITY`（默认 3）。不配置也能运行：两个源都无需密钥。
+
+Prompt / 市场语义：
+
+- `detect_market()` 先判 `crypto`，返回 `crypto`；`_MARKET_ROLES` / `_MARKET_GUIDELINES` 增加中英双语 crypto 条目，明确「7×24 连续交易、无涨跌停、无 T+1、现货 vs 永续、资金费率/未平仓/强平、链上数据与宏观流动性」，并显式要求 **不要** 套用 A 股涨跌停、北向资金、龙虎榜、融资融券、板块轮动等概念。
+- `src/core/market_profile.py` 增加 `CRYPTO_PROFILE`（`region="crypto"`，以 `BTC-USDT` 作为风险偏好锚点，`has_market_stats` / `has_sector_rankings` 均为 False）；`get_profile()` 支持直接传交易对，并通过 `detect_market` 归一。
+
+交易日历与调度：
+
+- `MARKET_EXCHANGE` 新增 `crypto` 哨兵值（`"24/7"`，没有交易所日历）、`MARKET_TIMEZONE` 新增 `crypto`（`UTC`）。`is_market_open` 对连续交易市场恒为 True，`infer_market_phase` 返回 `MarketPhase.INTRADAY`（连续开市阶段），`is_continuous_market()` 用于让所有日历查询跳过 `exchange-calendars`，避免把 crypto 当作「休市」。
+- 交易日过滤（`main.py::_compute_trading_day_filter`）不会因为 A 股/港股/美股休市而跳过 crypto 标的：`get_open_markets_today()` 始终包含 `crypto`。
+
+边界（不承诺项）：
+
+- **未实现 24/7 大盘复盘**：`MARKET_REVIEW_REGION` 仍只接受 `cn/hk/us/jp/kr/tw`（含 `both`），`compute_effective_region` 会忽略 `crypto`，`src/utils/market_review_region.py`、`src/share_image.py`、`src/services/daily_market_context.py` 的市场枚举未扩展。
+- 未接入选股/筛选（`src/services/screening/`）、Portfolio 估值与汇率、DecisionSignal（`VALID_MARKETS` 不含 `crypto`，会记录一条 info 后跳过）、Market Light 告警（仍为 `cn/hk/us`）、数据能力矩阵（`src/services/data_capability_service.py` 未登记 crypto 源）、Web 大盘市场选择器。
+- 不提供现货/永续区分数据、资金费率、未平仓合约、强平、链上指标与加密专用新闻源；报告仅基于日线 + 实时报价 + 既有新闻检索。
+- 不承诺 Yahoo crypto 可用性：目标部署服务器上 `query1.finance.yahoo.com` 返回 HTTP 429（`YFRateLimitError`），本地一次手工 smoke 可正常返回 `BTC-USD` 日线与实时行情，因此实际可用性随网络环境变化；Yahoo 兜底只保证「限流/失败时抛 `DataSourceUnavailableError` 并降级，不崩链路」。
+- 前端 `apps/dsa-web/src/utils/validation.ts` 只做「交易对形态」校验（`BASE-QUOTE` / `BASEQUOTE`），base 白名单仍由后端裁决；前端改动未执行 `npm run lint` / `npm run build`（本机 `npm ci` 被 `EALLOWREMOTE` 拦截，无 `node_modules`）。
+
+可复现验证（离线）：
+
+```bash
+python -m pytest -m "not network" tests/test_crypto_symbols.py tests/test_binance_vision_fetcher.py tests/test_market_context_crypto.py tests/test_yahoo_crypto_fetcher.py -q
+python -m pytest -m "not network" tests/test_stock_list_parser.py tests/test_trading_calendar.py tests/test_market_symbol_utils.py -q
+```
+
+回滚方式：移除 `crypto` 符号识别（`market_symbol_utils` 的 crypto 段）、两个 crypto fetcher 及其在 `_DAILY_MARKET_FETCHER_SUPPORT`/`_init_default_fetchers`/路由中的注册、`detect_market` 的 crypto 分支与角色/指南、`CRYPTO_PROFILE`、交易日历的 crypto 注册，以及 API/前端 crypto 校验分支，并删除本节能力声明；不涉及数据库迁移。

@@ -5,10 +5,13 @@ Phase 1 (issue #2063): structured analysis-target parsing.
 
 This module exposes :func:`parse_analysis_target`, which converts a single
 user-facing stock-list token (``"sh000300"``, ``"000300"``, ``"600519"``,
-``"hk00700"``, ``"AAPL"`` …) into a structured :class:`AnalysisTarget` with a
-stable ``asset_type`` / ``canonical_id`` / ``display_code`` / ``exchange``
-contract. The legacy :func:`split_stock_list` and :func:`serialize_stock_list`
-helpers are kept untouched so existing ``STOCK_LIST`` callers don't drift.
+``"hk00700"``, ``"AAPL"``, ``"BTC-USDT"`` …) into a structured
+:class:`AnalysisTarget` with a stable ``asset_type`` / ``canonical_id`` /
+``display_code`` / ``exchange`` contract. Virtual-currency pairs resolve to
+``asset_type='stock'`` with ``exchange='CRYPTO'`` so every existing consumer
+keeps working unchanged. The legacy :func:`split_stock_list` and
+:func:`serialize_stock_list` helpers are kept untouched so existing
+``STOCK_LIST`` callers don't drift.
 
 Three core contracts are pinned by this module and the regression tests in
 ``tests/test_stock_list_parser.py``:
@@ -36,6 +39,8 @@ import unicodedata
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
+
+from .market_symbol_utils import normalize_crypto_symbol
 
 __all__ = [
     "AnalysisTarget",
@@ -278,7 +283,7 @@ class AnalysisTarget:
     asset_type: str  # one of ParseStatus.*
     canonical_id: str
     display_code: str
-    exchange: str  # 'SH' / 'SZ' / 'BJ' / 'HK' / 'US' / 'UNKNOWN'
+    exchange: str  # 'SH' / 'SZ' / 'BJ' / 'HK' / 'US' / 'CRYPTO' / 'UNKNOWN'
     unsupported_reason: Optional[str] = None
     # Diagnostic breadcrumbs — not part of the public contract, but kept so
     # downstream phases can render sane error UI without re-parsing.
@@ -724,6 +729,25 @@ def parse_analysis_target(
             ),
             normalized_prefix=None,
             normalized_code=raw,
+        )
+
+    # Virtual-currency pairs (``BTC-USDT`` / ``BTCUSDT`` / ``btc-usdt``) are
+    # recognised before the generic US/suffix paths: the canonical
+    # ``BASE-QUOTE`` form is not a valid stock shape, so no existing stock
+    # contract can be affected. ``asset_type`` stays ``ParseStatus.STOCK``
+    # (every downstream consumer already handles it) and the market signal is
+    # carried by ``exchange="CRYPTO"``; ``canonical_id``/``normalized_code``
+    # hold the canonical pair so data-provider routing and storage converge.
+    crypto_symbol = normalize_crypto_symbol(raw)
+    if crypto_symbol is not None:
+        return AnalysisTarget(
+            raw_input=raw_input,
+            asset_type=ParseStatus.STOCK,
+            canonical_id=crypto_symbol,
+            display_code=crypto_symbol,
+            exchange="CRYPTO",
+            normalized_prefix=None,
+            normalized_code=crypto_symbol,
         )
 
     # Reuse the repository's existing normalization contract

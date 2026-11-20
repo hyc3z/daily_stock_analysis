@@ -43,6 +43,11 @@ from src.services.stock_service import StockService
 from src.services.stock_profile_service import InvalidStockProfileCode, StockProfileService
 from src.services.run_diagnostics import sanitize_diagnostic_text
 from src.services.stock_list_parser import split_stock_list
+from src.services.market_symbol_utils import (
+    CRYPTO_BASE_ASSETS,
+    CRYPTO_QUOTE_ASSETS,
+    normalize_crypto_symbol,
+)
 from src.services.system_config_service import SystemConfigService
 from data_provider.base import normalize_stock_code
 
@@ -77,6 +82,13 @@ def _write_watchlist_codes(service: SystemConfigService, codes: list) -> None:
     )
 
 
+# 虚拟货币交易对：只接受共享 allowlist 里的 base + quote（``BTC-USDT`` / ``BTCUSDT``），
+# 不放开任意长字母串，避免弱化既有股票代码校验。
+_CRYPTO_PAIR_PATTERN = "(?:{})(?:-?)(?:{})".format(
+    "|".join(CRYPTO_BASE_ASSETS),
+    "|".join(CRYPTO_QUOTE_ASSETS),
+)
+
 # Stock code validation patterns (aligned with frontend validateStockCode)
 _STOCK_CODE_RE = re.compile(
     r"^(?:\d{6}"                              # A-share 6-digit
@@ -89,6 +101,7 @@ _STOCK_CODE_RE = re.compile(
     r"|\d{6}\.(?:KS|KQ)"                     # Korea Yahoo suffix format
     r"|\d{4,6}\.(?:TW|TWO)"                  # Taiwan Yahoo suffix format
     r"|[A-Z]{1,5}(?:\.(?:US|[A-Z]))?"         # US ticker
+    rf"|{_CRYPTO_PAIR_PATTERN}"               # virtual-currency pair (BTC-USDT/BTCUSDT)
     r")$",
     re.IGNORECASE,
 )
@@ -113,12 +126,16 @@ def _validate_and_normalize_stock_code(code: str) -> str:
                 "message": f"'{stripped}' 不是合法的股票代码格式",
             },
         )
+    # 虚拟货币交易对归一到 ``BASE-QUOTE`` 大写形式；股票代码维持原路径。
+    crypto_symbol = normalize_crypto_symbol(stripped)
+    if crypto_symbol is not None:
+        return crypto_symbol
     return normalize_stock_code(stripped)
 
 
 def _watchlist_match_key(code: str) -> str:
     """Return the equivalence key used for watchlist add/remove matching."""
-    normalized = normalize_stock_code(code.strip())
+    normalized = normalize_crypto_symbol(code) or normalize_stock_code(code.strip())
     if re.fullmatch(r"\d{5}", normalized):
         return f"HK{normalized}"
     return normalized.upper()

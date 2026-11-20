@@ -5,10 +5,14 @@
 ===================================
 
 职责：
-1. 按市场（A股/港股/美股/日股/韩股/台股）判断当日是否为交易日
+1. 按市场（A股/港股/美股/日股/韩股/台股/虚拟货币）判断当日是否为交易日
 2. 按市场时区取“今日”日期，避免服务器 UTC 导致日期错误
 3. 支持 per-stock 过滤：只分析当日开市市场的股票
 4. 提供 regular-session 市场阶段推断基线，不改变现有分析入口行为
+
+虚拟货币（``crypto``）为 7×24 连续交易市场：没有交易所日历，任何交易日/
+市场阶段判断都必须按“始终开市”处理（见 ``_CONTINUOUS_MARKETS``），不得
+因为股票日历而跳过加密货币标的。
 
 依赖：exchange-calendars（可选，交易日判断不可用时 fail-open，阶段推断不可用时 unknown）
 """
@@ -22,7 +26,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from src.services.market_symbol_utils import get_suffix_market
+from src.services.market_symbol_utils import get_suffix_market, is_crypto_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -38,7 +42,23 @@ except ImportError:
     )
 
 # Market -> exchange code (exchange-calendars)
-MARKET_EXCHANGE = {"cn": "XSHG", "hk": "XHKG", "us": "XNYS", "jp": "XTKS", "kr": "XKRX", "tw": "XTAI"}
+# ``crypto`` is a sentinel: virtual-currency pairs trade 24/7 and have no
+# exchange calendar. Every calendar lookup guards on ``_CONTINUOUS_MARKETS``
+# before touching ``exchange-calendars``, so the sentinel is never passed to
+# ``xcals.get_calendar``.
+MARKET_EXCHANGE = {
+    "cn": "XSHG",
+    "hk": "XHKG",
+    "us": "XNYS",
+    "jp": "XTKS",
+    "kr": "XKRX",
+    "tw": "XTAI",
+    "crypto": "24/7",
+}
+
+# Markets that trade continuously: every calendar day is a session and the
+# market is always open. Keep this in sync with ``MARKET_EXCHANGE`` above.
+_CONTINUOUS_MARKETS = frozenset({"crypto"})
 
 # Market -> IANA timezone for "today"
 MARKET_TIMEZONE = {
@@ -48,7 +68,21 @@ MARKET_TIMEZONE = {
     "jp": "Asia/Tokyo",
     "kr": "Asia/Seoul",
     "tw": "Asia/Taipei",
+    # 24/7 markets are conventionally annotated in UTC (daily candles close at
+    # 00:00 UTC), which is also the timezone Binance Vision klines use.
+    "crypto": "UTC",
 }
+
+
+def is_continuous_market(market: Optional[str]) -> bool:
+    """Return True for 24/7 markets such as virtual currency.
+
+    Continuous markets are always open and have no exchange calendar, so every
+    calendar-dependent code path must skip the lookup instead of treating them
+    as "closed".
+    """
+    return (market or "").strip().lower() in _CONTINUOUS_MARKETS
+
 
 # P0 market phase baseline (Issue #1386). This is an intentionally small
 # regular-session inference layer; it does not change existing fail-open
@@ -127,7 +161,8 @@ def get_market_for_stock(code: str) -> Optional[str]:
     Infer market region for a stock code.
 
     Returns:
-        'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | None (None = unrecognized, fail-open: treat as open)
+        'crypto' | 'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | None
+        (None = unrecognized, fail-open: treat as open)
     """
     if not code or not isinstance(code, str):
         return None
@@ -135,6 +170,10 @@ def get_market_for_stock(code: str) -> Optional[str]:
 
     from data_provider import is_us_stock_code, is_us_index_code, is_hk_stock_code
 
+    # Virtual currency is checked first: ``BTC-USDT``/``BTCUSDT`` must never be
+    # mistaken for a stock, and crypto trades 24/7 (see ``_CONTINUOUS_MARKETS``).
+    if is_crypto_symbol(code):
+        return "crypto"
     if is_us_stock_code(code) or is_us_index_code(code):
         return "us"
     if is_hk_stock_code(code):
@@ -154,13 +193,18 @@ def is_market_open(market: str, check_date: date) -> bool:
 
     Fail-open: returns True if exchange-calendars unavailable or date out of range.
 
+    Continuous markets (``crypto``) are always open — they have no exchange
+    calendar, so they must never be reported as closed.
+
     Args:
-        market: 'cn' | 'hk' | 'us'
+        market: 'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'crypto'
         check_date: Date to check
 
     Returns:
         True if trading day (or fail-open), False otherwise
     """
+    if is_continuous_market(market):
+        return True
     if not _XCALS_AVAILABLE:
         return True
     ex = MARKET_EXCHANGE.get(market)
@@ -179,7 +223,10 @@ def get_trading_dates(market: str, start_date: date, end_date: date) -> Optional
     """Return inclusive session date labels, or None if the calendar is unavailable.
 
     Missing calendars must not turn weekdays or observed quote dates into sessions.
+    For 24/7 markets every calendar day is a session.
     """
+    if is_continuous_market(market):
+        return pd.date_range(start=start_date, end=end_date, freq="D").normalize()
     if not _XCALS_AVAILABLE or market not in MARKET_EXCHANGE:
         return None
     try:
@@ -197,7 +244,10 @@ def get_next_trading_date(market: str, check_date: date) -> Optional[date]:
     Unlike ``is_market_open`` this does not fail open: returns None when
     exchange-calendars is unavailable, the market is unknown, or the date is
     outside the calendar range, so callers can report "unknown" explicitly.
+    Continuous markets have no calendar and return the next calendar day.
     """
+    if is_continuous_market(market):
+        return check_date + timedelta(days=1)
     if not _XCALS_AVAILABLE:
         return None
     ex = MARKET_EXCHANGE.get(market)
@@ -247,10 +297,14 @@ def get_effective_trading_date(
     - Trading day before market close: previous completed trading session
     - Trading day after market close: current trading session
     - Calendar lookup failure: fail-open to market-local natural date
+    - 24/7 markets (``crypto``): fail-open to the market-local natural date
+      (the daily candle dated ``D`` closes at ``D+1 00:00`` market-local time)
     """
     market_now = get_market_now(market, current_time=current_time)
     fallback_date = market_now.date()
 
+    if is_continuous_market(market):
+        return fallback_date
     if not _XCALS_AVAILABLE:
         return fallback_date
 
@@ -294,7 +348,17 @@ def resolve_historical_daily_bar_date(
     A persisted ``effective_daily_bar_date`` remains the primary authority.
     This fallback is only for older snapshots that still contain a trustworthy
     phase. It fails closed for missing, unknown, or calendar-inconsistent phases.
+
+    For 24/7 markets every calendar day is a session: intraday phases consume
+    the previous day's completed candle, postmarket consumes the current one.
     """
+    if is_continuous_market(market):
+        normalized = str(phase or "").strip().lower()
+        if normalized in {"intraday", "lunch_break", "closing_auction", "premarket"}:
+            return target_date - timedelta(days=1)
+        if normalized in {"postmarket", "non_trading"}:
+            return target_date
+        return None
     if market not in MARKET_EXCHANGE or not _XCALS_AVAILABLE:
         return None
 
@@ -387,9 +451,16 @@ def infer_market_phase(
     session only; they do not imply that extended-hours quote data is available.
     ``closing_auction`` uses a small per-market near-close heuristic window and
     does not model full exchange auction microstructure.
+
+    24/7 markets (``crypto``) have no exchange calendar. They are reported as
+    ``MarketPhase.INTRADAY`` — the continuous open phase — so downstream
+    consumers keep seeing a supported phase value while
+    ``is_market_open_now``/``is_partial_bar`` stay true.
     """
     if market not in MARKET_EXCHANGE or market not in MARKET_TIMEZONE:
         return MarketPhase.UNKNOWN
+    if is_continuous_market(market):
+        return MarketPhase.INTRADAY
     if not _XCALS_AVAILABLE:
         return MarketPhase.UNKNOWN
 
@@ -473,6 +544,8 @@ def _session_open_close_for_today(
     market: str,
     market_now: datetime,
 ) -> Tuple[Optional[datetime], Optional[datetime]]:
+    if is_continuous_market(market):
+        return None, None
     ex = MARKET_EXCHANGE.get(market)
     tz_name = MARKET_TIMEZONE.get(market)
     if not ex or not tz_name or not _XCALS_AVAILABLE:
@@ -495,6 +568,10 @@ def _phase_minutes(
     market_now: datetime,
     phase: MarketPhase,
 ) -> Tuple[Optional[int], Optional[int], bool]:
+    # 24/7 markets never open/close, so there is no meaningful minutes-to-*
+    # distance (and no calendar to read session bounds from).
+    if is_continuous_market(market):
+        return None, None, False
     if (
         market not in MARKET_EXCHANGE
         or phase in {MarketPhase.UNKNOWN, MarketPhase.NON_TRADING, MarketPhase.POSTMARKET}
@@ -573,7 +650,9 @@ def build_market_phase_context(
         phase = MarketPhase.UNKNOWN
         _add_warning_code(warnings, "unknown_market")
     else:
-        if not _XCALS_AVAILABLE:
+        # 24/7 markets (crypto) do not need exchange-calendars at all, so a
+        # missing calendar is not a degradation signal for them.
+        if not _XCALS_AVAILABLE and not is_continuous_market(market):
             _add_warning_code(warnings, "calendar_unavailable")
         if requested_phase == "auto":
             phase = infer_market_phase(market, current_time=current_time)

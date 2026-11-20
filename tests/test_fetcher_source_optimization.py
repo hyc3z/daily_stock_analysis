@@ -146,8 +146,12 @@ class TestFetcherSourceOptimization(unittest.TestCase):
             [
                 "EfinanceFetcher",
                 "AkshareFetcher",
+                # Crypto-only sources are always registered (no key needed) and
+                # sort by their default priorities 1 / 3.
+                "BinanceVisionFetcher",
                 "PytdxFetcher",
                 "BaostockFetcher",
+                "YahooCryptoFetcher",
                 "YfinanceFetcher",
                 "TencentFetcher",
             ],

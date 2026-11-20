@@ -2,8 +2,8 @@
 """
 Market context detection for LLM prompts.
 
-Detects the market (A-shares, HK, US) from a stock code and returns
-market-specific role descriptions so prompts are not hardcoded to a
+Detects the market (A-shares, HK, US, JP/KR/TW, crypto) from a stock code and
+returns market-specific role descriptions so prompts are not hardcoded to a
 single market.
 
 Fixes: https://github.com/ZhuLinsen/daily_stock_analysis/issues/644
@@ -12,19 +12,25 @@ Fixes: https://github.com/ZhuLinsen/daily_stock_analysis/issues/644
 import re
 from typing import Optional
 
-from src.services.market_symbol_utils import get_suffix_market
+from src.services.market_symbol_utils import get_suffix_market, is_crypto_symbol
 
 
 def detect_market(stock_code: Optional[str]) -> str:
     """Detect market from stock code.
 
     Returns:
-        One of 'cn', 'hk', 'us', or 'cn' as fallback.
+        One of 'crypto', 'cn', 'hk', 'us', 'jp', 'kr', 'tw', or 'cn' as fallback.
     """
     if not stock_code:
         return "cn"
 
     code = stock_code.strip().upper()
+
+    # Virtual currency pairs (``BTC-USDT`` / ``BTCUSDT``) are checked first:
+    # their allowlisted ``BASE-QUOTE`` shape never collides with the stock
+    # patterns below, so this branch only claims explicit crypto pairs.
+    if is_crypto_symbol(code):
+        return "crypto"
 
     # HK stocks: HK00700, 00700.HK, or 5-digit pure numbers
     if code.startswith("HK") or code.endswith(".HK"):
@@ -65,6 +71,10 @@ _MARKET_ROLES = {
     "us": {
         "zh": "美股",
         "en": "US stock",
+    },
+    "crypto": {
+        "zh": "虚拟货币（加密货币）",
+        "en": "virtual currency (crypto)",
     },
     "jp": {
         "zh": "日股",
@@ -144,6 +154,31 @@ _MARKET_GUIDELINES = {
             "electronics-foundry supply chain, the three institutional investor groups (foreign / "
             "investment-trust / dealer), margin trading and day trading, and the TWSE/TPEx ±10% daily "
             "price limit; do not apply China A-share-specific concepts such as Northbound flows or Dragon Tiger lists."
+        ),
+    },
+    "crypto": {
+        "zh": (
+            "- 本次分析对象为 **虚拟货币（加密货币）**，代码为 `BASE-QUOTE` 交易对（如 `BTC-USDT`）。\n"
+            "- 加密市场 **7×24 小时连续交易**，没有收盘概念，也 **没有每日涨跌停限制**，"
+            "不适用 T+1 交割（现货可随时买卖）。\n"
+            "- 请区分 **现货（spot）与永续合约（perpetual）**：只有在存在衍生品数据时才讨论资金费率"
+            "（funding rate）、未平仓合约（open interest）与强平/爆仓（liquidation）数据。\n"
+            "- 主要驱动因素：链上数据（活跃地址、交易所净流入、稳定币供给、Gas 费）、"
+            "ETF/机构资金流、监管与宏观流动性（美元指数、美联储政策、实际利率）、以及行业叙事。\n"
+            "- 请勿套用 A 股概念：**不要**使用涨跌停、北向资金、龙虎榜、融资融券、板块轮动等 A 股专属框架；"
+            "也不要把加密货币当作上市公司股票去讨论市盈率、市值与财报。"
+        ),
+        "en": (
+            "- This analysis covers a **virtual currency (crypto)** pair quoted as `BASE-QUOTE` (e.g. `BTC-USDT`).\n"
+            "- Crypto markets trade **24/7 continuously**: there is no closing bell and **no daily price limit**, "
+            "and T+1 settlement does not apply (spot can be bought/sold at any time).\n"
+            "- Distinguish **spot** from **perpetuals**: only discuss funding rate, open interest and "
+            "liquidation data when derivative data is actually provided.\n"
+            "- Key drivers: on-chain data (active addresses, exchange net flows, stablecoin supply, gas fees), "
+            "ETF/institutional flows, regulation and macro liquidity (DXY, Fed policy, real yields), and sector narratives.\n"
+            "- Do not apply China A-share concepts: **never** use daily price-limit boards, Northbound flows, "
+            "Dragon Tiger lists, margin-financing (融资融券) narratives or A-share sector-rotation framing; "
+            "do not treat a crypto asset as a listed company with P/E, market cap or earnings reports."
         ),
     },
 }

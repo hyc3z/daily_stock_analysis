@@ -6,6 +6,12 @@ interface ValidationResult {
 
 const SUPPORTED_QUERY_CHARACTERS = /^[A-Z0-9.\u3400-\u9FFF\s]+$/;
 
+// Virtual-currency (crypto) pairs: shape-level check only. The backend owns the
+// base-asset allowlist (see src/services/market_symbol_utils.py) and rejects
+// unknown bases; keeping the UI check shape-based avoids maintaining a second
+// copy of that allowlist in the frontend.
+const CRYPTO_QUOTE_ASSETS = 'USDT|USDC|BUSD|FDUSD|USD|BTC|ETH';
+
 const STOCK_CODE_PATTERNS = [
   /^\d{6}$/, // A-share 6-digit code
   /^(SH|SZ|BJ)\d{6}$/, // A-share code with exchange prefix (also covers index canonical sh000016 / sh000300)
@@ -18,6 +24,9 @@ const STOCK_CODE_PATTERNS = [
   /^[A-Z]{1,5}(?:\.(?:US|[A-Z]))?$/, // Common US ticker format
   /^CSI\d{6}$/, // Registered CSI index canonical (e.g. csi930955)
   /^\d{6}\.CSI$/, // Registered CSI index display form (e.g. 930955.CSI)
+  new RegExp(`^[A-Z]{2,6}-(?:${CRYPTO_QUOTE_ASSETS})$`), // Crypto pair, e.g. BTC-USDT
+  new RegExp(`^[A-Z]{2,6}(?:USDT|USDC|BUSD|FDUSD)$`), // Crypto pair without dash, e.g. BTCUSDT
+  new RegExp(`^[A-Z]{2,6}(?:USD|BTC|ETH)$`), // Crypto pair with a non-stable quote, e.g. ETHBTC
 ];
 
 /**

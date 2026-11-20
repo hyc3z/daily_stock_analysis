@@ -9,6 +9,9 @@
 from dataclasses import dataclass
 from typing import List
 
+from src.market_context import detect_market
+from src.services.market_symbol_utils import is_crypto_symbol
+
 
 @dataclass
 class MarketProfile:
@@ -107,16 +110,51 @@ TW_PROFILE = MarketProfile(
 )
 
 
+CRYPTO_PROFILE = MarketProfile(
+    region="crypto",
+    # 虚拟货币没有统一的“大盘指数”，以 BTC 作为整体风险偏好的观察锚点。
+    mood_index_code="BTC-USDT",
+    news_queries=[
+        "crypto market BTC ETH 行情",
+        "Bitcoin ETF institutional flows",
+        "美联储 流动性 加密市场 监管",
+    ],
+    prompt_index_hint=(
+        "分析 BTC、ETH 等主要虚拟货币交易对走势；如需引用指数/锚点，请说明其为 24/7 "
+        "连续交易、无涨跌停，且不要套用 A 股涨跌停、北向资金、龙虎榜、融资融券、板块轮动等概念"
+    ),
+    has_market_stats=False,
+    has_sector_rankings=False,
+)
+
+
+_MARKET_PROFILES = {
+    "us": US_PROFILE,
+    "hk": HK_PROFILE,
+    "jp": JP_PROFILE,
+    "kr": KR_PROFILE,
+    "tw": TW_PROFILE,
+    "crypto": CRYPTO_PROFILE,
+}
+
+
 def get_profile(region: str) -> MarketProfile:
-    """根据 region 返回对应的 MarketProfile"""
-    if region == "us":
-        return US_PROFILE
-    if region == "hk":
-        return HK_PROFILE
-    if region == "jp":
-        return JP_PROFILE
-    if region == "kr":
-        return KR_PROFILE
-    if region == "tw":
-        return TW_PROFILE
+    """根据 region 返回对应的 MarketProfile。
+
+    ``region`` 通常是 ``cn/hk/us/jp/kr/tw/crypto``；也接受直接传入虚拟货币
+    标的代码（如 ``BTC-USDT``），此时用 :func:`src.market_context.detect_market`
+    归一到市场区域，保证“代码 → 市场 → profile”只有一份判定真源。
+
+    未知 / 非法 region 保持历史行为（回退 ``CN_PROFILE``），避免把任意配置值
+    误判成其他市场的复盘 profile。
+    """
+    normalized = str(region or "").strip().lower()
+    if normalized in _MARKET_PROFILES:
+        return _MARKET_PROFILES[normalized]
+    if normalized == "cn":
+        return CN_PROFILE
+    if is_crypto_symbol(region):
+        detected = detect_market(region)
+        if detected in _MARKET_PROFILES:
+            return _MARKET_PROFILES[detected]
     return CN_PROFILE

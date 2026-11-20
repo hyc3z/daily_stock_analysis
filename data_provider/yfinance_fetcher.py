@@ -791,6 +791,20 @@ class YfinanceFetcher(BaseFetcher):
             logger.warning(f"[Yfinance] 获取美股指数 {user_code} 实时行情失败: {e}")
             return None
 
+    def _supports_realtime_quote(self, stock_code: str) -> bool:
+        """Return True when this fetcher's realtime path serves the symbol.
+
+        Kept as its own hook so subclasses (e.g. ``YahooCryptoFetcher``) can
+        extend the accepted symbol families without duplicating the quote
+        body below.
+        """
+        return (
+            self._is_us_stock(stock_code)
+            or _is_hk_market(stock_code)
+            or self._is_jp_kr_suffix_stock(stock_code)
+            or self._is_tw_suffix_stock(stock_code)
+        )
+
     def get_realtime_quote(self, stock_code: str) -> Optional[UnifiedRealtimeQuote]:
         """
         获取美股、港股、日韩台股票或美股指数实时行情数据
@@ -815,13 +829,8 @@ class YfinanceFetcher(BaseFetcher):
                 index_name=index_name,
             )
 
-        # 仅处理美股、港股或 JP/KR/TW suffix-only 股票
-        if not (
-            self._is_us_stock(stock_code)
-            or _is_hk_market(stock_code)
-            or self._is_jp_kr_suffix_stock(stock_code)
-            or self._is_tw_suffix_stock(stock_code)
-        ):
+        # 仅处理美股、港股、JP/KR/TW suffix-only 股票（子类可扩展识别范围）
+        if not self._supports_realtime_quote(stock_code):
             logger.debug(f"[Yfinance] {stock_code} 不是支持的美股、港股或日韩台代码，跳过")
             return None
 

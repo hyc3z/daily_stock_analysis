@@ -26,7 +26,7 @@ import pandas as pd
 import numpy as np
 from src.data.stock_index_loader import get_index_stock_name
 from src.data.stock_mapping import STOCK_NAME_MAP, is_meaningful_stock_name
-from src.services.market_symbol_utils import is_suffix_market_symbol
+from src.services.market_symbol_utils import is_crypto_symbol, is_suffix_market_symbol
 from src.services.run_diagnostics import record_provider_run, record_provider_run_started
 from src.services.stock_list_parser import AnalysisTarget, ParseStatus, parse_analysis_target
 from .fundamental_adapter import AkshareFundamentalAdapter
@@ -651,7 +651,12 @@ class DataFetcherManager:
         "FutuFetcher": {"hk"},
         "FinnhubFetcher": {"us"},
         "AlphaVantageFetcher": {"us"},
+        # 虚拟货币专属数据源：只服务 crypto，绝不进入 A 股/港股/美股链路
+        "BinanceVisionFetcher": {"crypto"},
+        "YahooCryptoFetcher": {"crypto"},
     }
+    # 虚拟货币数据源固定顺序：Binance Vision（免密钥、最快）→ Yahoo crypto 兜底。
+    _CRYPTO_SOURCE_ORDER = ("BinanceVisionFetcher", "YahooCryptoFetcher")
     _daily_source_health = CircuitBreaker(failure_threshold=3, cooldown_seconds=300.0)
     _CN_INDEX_DAILY_SOURCE_ORDER = (
         "TencentFetcher",
@@ -819,6 +824,28 @@ class DataFetcherManager:
                 ", ".join(skipped),
             )
         return kept
+
+    @classmethod
+    def _exclude_crypto_fetchers(cls, fetchers: List[BaseFetcher]) -> List[BaseFetcher]:
+        """Drop virtual-currency sources from the A-share generic chain.
+
+        The ``market != "cn"`` branch already filters by market support; the
+        A-share branch keeps its historical chain untouched, so crypto-only
+        sources are removed explicitly instead of being attempted once per
+        A-share symbol.
+        """
+        return [fetcher for fetcher in fetchers if fetcher.name not in cls._CRYPTO_SOURCE_ORDER]
+
+    @classmethod
+    def _crypto_fetchers(cls, fetchers: List[BaseFetcher]) -> List[BaseFetcher]:
+        """Keep only crypto-capable sources, ordered Binance Vision -> Yahoo crypto."""
+        by_name = {fetcher.name: fetcher for fetcher in fetchers}
+        ordered: List[BaseFetcher] = []
+        for name in cls._CRYPTO_SOURCE_ORDER:
+            fetcher = by_name.get(name)
+            if fetcher is not None:
+                ordered.append(fetcher)
+        return ordered
 
     @classmethod
     def _filter_fetchers_by_capability(
@@ -1836,6 +1863,8 @@ class DataFetcherManager:
         from .pytdx_fetcher import PytdxFetcher
         from .baostock_fetcher import BaostockFetcher
         from .yfinance_fetcher import YfinanceFetcher
+        from .binance_vision_fetcher import BinanceVisionFetcher
+        from .yahoo_crypto_fetcher import YahooCryptoFetcher
         from .longbridge_fetcher import LongbridgeFetcher
         from .futu_fetcher import FutuFetcher
         config = get_config()
@@ -1846,6 +1875,9 @@ class DataFetcherManager:
         pytdx = PytdxFetcher()      # 通达信数据源（可配 PYTDX_HOST/PYTDX_PORT）
         baostock = BaostockFetcher()
         yfinance = YfinanceFetcher()
+        # 虚拟货币专属数据源（免密钥，仅服务 crypto 市场）
+        binance_vision = BinanceVisionFetcher()
+        yahoo_crypto = YahooCryptoFetcher()
         optional_fetchers: List[BaseFetcher] = []
 
         tushare_token = (getattr(config, "tushare_token", None) or "").strip()
@@ -1919,6 +1951,8 @@ class DataFetcherManager:
                 pytdx,
                 baostock,
                 yfinance,
+                binance_vision,
+                yahoo_crypto,
                 tencent,
                 *optional_fetchers,
             ]
@@ -2007,14 +2041,38 @@ class DataFetcherManager:
         is_jp = (not is_us) and (not is_hk) and _is_jp_market(stock_code)
         is_kr = (not is_us) and (not is_hk) and _is_kr_market(stock_code)
         is_tw = (not is_us) and (not is_hk) and _is_tw_market(stock_code)
-        market = "us" if is_us else "hk" if is_hk else "jp" if is_jp else "kr" if is_kr else "tw" if is_tw else "cn"
-        if market != "cn":
+        # 虚拟货币（crypto）优先于股票市场判定：``BTC-USDT``/``BTCUSDT`` 由共享
+        # allowlist 识别，不会与 A 股/港股/美股代码冲突。
+        is_crypto = is_crypto_symbol(stock_code)
+        market = (
+            "crypto" if is_crypto
+            else "us" if is_us
+            else "hk" if is_hk
+            else "jp" if is_jp
+            else "kr" if is_kr
+            else "tw" if is_tw
+            else "cn"
+        )
+        if market == "crypto":
+            # 只保留虚拟货币数据源，顺序固定 Binance Vision -> Yahoo crypto
+            fetchers = self._crypto_fetchers(fetchers)
+        elif market != "cn":
             fetchers = self._filter_daily_fetchers_for_market(fetchers, market)
+        else:
+            # A 股链路保持原样，仅显式排除虚拟货币专属数据源
+            fetchers = self._exclude_crypto_fetchers(fetchers)
         fetchers = self._filter_fetchers_by_capability(fetchers, capability="daily_data")
         total_fetchers = len(fetchers)
 
         if total_fetchers == 0:
-            market_label = "美股指数" if is_us_index else "美股" if is_us else "港股" if is_hk else "台股" if is_tw else "A股"
+            market_label = (
+                "虚拟货币" if is_crypto
+                else "美股指数" if is_us_index
+                else "美股" if is_us
+                else "港股" if is_hk
+                else "台股" if is_tw
+                else "A股"
+            )
             error_summary = f"{market_label} {stock_code} 获取失败:\n暂无可用数据源"
             logger.error(f"[数据源终止] {stock_code} 获取失败: {error_summary}")
             raise DataFetchError(error_summary)
@@ -2513,6 +2571,27 @@ class DataFetcherManager:
         is_jp = (not is_us) and (not is_hk) and _is_jp_market(stock_code)
         is_kr = (not is_us) and (not is_hk) and _is_kr_market(stock_code)
         is_tw = (not is_us) and (not is_hk) and _is_tw_market(stock_code)
+
+        # 虚拟货币：固定 Binance Vision -> Yahoo crypto，绝不落到 A 股/港股/美股
+        # 实时源（那些接口不接受 ``BTC-USDT`` 形态的代码）。
+        if is_crypto_symbol(stock_code):
+            fallback_from: Optional[str] = None
+            for fetcher_name in self._CRYPTO_SOURCE_ORDER:
+                quote = self._try_fetcher_quote(stock_code, fetcher_name, **target_kwargs)
+                if quote is not None:
+                    logger.info(
+                        "[实时行情] 虚拟货币 %s 成功获取 (来源: %s)", stock_code, fetcher_name
+                    )
+                    return self._enrich_realtime_quote(
+                        quote,
+                        fallback_from=fallback_from,
+                        realtime_cache_ttl=getattr(config, "realtime_cache_ttl", None),
+                    )
+                if fallback_from is None:
+                    fallback_from = self._realtime_fetcher_token(fetcher_name)
+            if log_final_failure:
+                logger.info("[实时行情] 虚拟货币 %s 无可用数据源", stock_code)
+            return None
 
         if is_jp or is_kr or is_tw:
             market_label = "日股" if is_jp else "韩股" if is_kr else "台股"
