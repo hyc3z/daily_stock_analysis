@@ -20,6 +20,26 @@ RUN DSA_WEB_VERSION="${DSA_WEB_VERSION}" DSA_WEB_REVISION="${DSA_WEB_REVISION}" 
 # Pin to bookworm: wkhtmltopdf was removed from Debian testing (2025)
 FROM python:3.11-slim-bookworm
 
+# ---------------------------------------------------------------------------
+# Python 依赖构建阶段：只有这里需要编译工具链（gcc），产物单独拷进运行镜像。
+# 运行镜像不再安装 gcc，省下约 120MB 镜像层；构建缓存仍走 BuildKit cache mount。
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim-bookworm AS py-builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY requirements.txt .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --no-compile --prefix=/install -r requirements.txt
+
+# ---------------------------------------------------------------------------
+# 运行镜像
+# ---------------------------------------------------------------------------
+FROM python:3.11-slim-bookworm
+
 # 设置工作目录
 WORKDIR /app
 
@@ -28,8 +48,8 @@ ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
 
 # 安装系统依赖（wkhtmltopdf 含 wkhtmltoimage，用于 Markdown 转图片 Issue #289）
+# 注意：这里不再安装 gcc，编译工具链只存在于 py-builder 阶段。
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc \
     curl \
     gosu \
     wkhtmltopdf \
@@ -44,11 +64,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN groupadd -g 1000 dsa && \
     useradd -u 1000 -g dsa -m dsa
 
-# 复制依赖文件
+# 复制已构建好的 Python 依赖（与运行镜像同为 python:3.11-slim-bookworm，路径一致）
+COPY --from=py-builder /install /usr/local
 COPY requirements.txt .
-
-# 安装 Python 依赖
-RUN --mount=type=cache,target=/root/.cache/pip pip install -r requirements.txt
 
 # 复制应用代码
 COPY *.py ./
