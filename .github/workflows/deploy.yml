@@ -1,15 +1,15 @@
 name: deploy
 
-# Build on a GitHub runner, push to Huawei SWR, then trigger the restricted
-# deploy entry on the server over SSH. SWR is used because the server reaches it
-# fast (in-China), while GHCR/Docker Hub are effectively unreachable from it.
+# Build on a GitHub runner, push to Huawei SWR, then:
+#   1. push runtime secrets to the server over SSH (stdin only, never argv),
+#   2. trigger the restricted deploy entry, which pulls the image and restarts.
 #
 # Repository secrets:
-#   SWR_USERNAME / SWR_PASSWORD   from SWR -> Login Command -> long-term command
-#                                 generated with the CI IAM user's AK/SK
-#                                 (username keeps its region prefix, e.g. cn-north-4@...)
+#   SWR_USERNAME / SWR_PASSWORD   SWR long-term login command values
 #   DSA_DEPLOY_SSH_KEY            private key locked to
 #                                 command="/usr/local/bin/agent-ops-gh-deploy-dsa",restrict
+#   DEEPSEEK_API_KEY              runtime only; written into the server config
+#   TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID   optional notifications
 on:
   push:
     branches: [main]
@@ -40,8 +40,8 @@ jobs:
           username: ${{ secrets.SWR_USERNAME }}
           password: ${{ secrets.SWR_PASSWORD }}
 
-      # Docker media types (not OCI) plus no provenance/SBOM: this is the export
-      # form the existing SWR repositories were verified with.
+      # Docker media types (not OCI) plus no provenance/SBOM: the export form the
+      # existing SWR repositories were verified with.
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
@@ -63,24 +63,37 @@ jobs:
     runs-on: ubuntu-latest
     environment: production
     steps:
-      - name: SSH deploy
-        env:
-          HOST: 124.223.8.213
-          PORT: 22
-          USER: ubuntu
-          SHA: ${{ github.sha }}
+      - name: Prepare ssh
         run: |
           set -euo pipefail
           mkdir -p ~/.ssh && chmod 700 ~/.ssh
           printf '%s\n' "${{ secrets.DSA_DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -p "$PORT" -H "$HOST" >> ~/.ssh/known_hosts 2>/dev/null
-          # The server pulls a large image inside this session; keepalives plus a
-          # server-side detached unit keep the deploy alive across idle windows.
+          ssh-keyscan -H 124.223.8.213 >> ~/.ssh/known_hosts 2>/dev/null
+
+      - name: Push runtime secrets
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          set -euo pipefail
+          for name in DEEPSEEK_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
+            value="${!name:-}"
+            if [ -z "$value" ]; then echo "$name: not set, skipped"; continue; fi
+            printf '%s' "$value" | ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes \
+              ubuntu@124.223.8.213 "setenv $name"
+          done
+
+      - name: Deploy
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
           ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=40 \
-            -p "$PORT" "$USER@$HOST" "deploy $SHA"
+            ubuntu@124.223.8.213 "deploy $SHA"
 
       - name: Verify site
         run: |
-          curl -fsS -o /dev/null -w 'site https=%{http_code}\n' https://stock.qianxue.online/ \
-            || echo "verify skipped: site not wired up yet"
+          curl -fsS -o /dev/null -w 'site=%{http_code}\n' http://stock.qianxue.online/ \
+            || echo "verify skipped: site not reachable yet"
