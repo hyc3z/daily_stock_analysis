@@ -1,14 +1,15 @@
-name: deploy-swr
+name: deploy
 
-# Build the image on a GitHub runner, push it to Huawei Cloud SWR, then trigger
-# the restricted deploy entry on the server. The server never builds.
+# Build on a GitHub runner, push to GHCR with the automatic GITHUB_TOKEN (no
+# long-lived registry credentials), then trigger the restricted deploy entry on
+# the server over SSH.
 #
-# Required repository secrets:
-#   SWR_USERNAME / SWR_PASSWORD     registry credentials for SWR
-#   DSA_DEPLOY_SSH_KEY              private key whose public half is locked to
-#                                   command="/usr/local/bin/agent-ops-gh-deploy-dsa",restrict
-#   DEPLOY_HOST / DEPLOY_USER       e.g. 124.223.8.213 / ubuntu
-#   DEPLOY_PORT                     optional, defaults to 22
+# The only repository secret this needs is DSA_DEPLOY_SSH_KEY, whose public half
+# is locked to command="/usr/local/bin/agent-ops-gh-deploy-dsa",restrict.
+#
+# After the first successful push the package must be made Public once
+# (repo -> Packages -> daily_stock_analysis -> settings -> Change visibility),
+# so the server can pull it anonymously.
 on:
   push:
     branches: [main]
@@ -19,25 +20,25 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  REGISTRY: swr.cn-north-4.myhuaweicloud.com
-  IMAGE: swr.cn-north-4.myhuaweicloud.com/agent-playground/dsa
+  IMAGE: ghcr.io/hyc3z/daily_stock_analysis
 
 jobs:
   build:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: write
     steps:
       - uses: actions/checkout@v4
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Log in to SWR
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.SWR_USERNAME }}
-          password: ${{ secrets.SWR_PASSWORD }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -59,7 +60,7 @@ jobs:
     steps:
       - name: SSH deploy
         env:
-          # Target host is not a secret: it is the same public IP that serves the domain.
+          # Not a secret: the same public IP serves the domain.
           HOST: 124.223.8.213
           PORT: 22
           USER: ubuntu
@@ -73,7 +74,7 @@ jobs:
           ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes -p "$PORT" "$USER@$HOST" "deploy $SHA"
 
       - name: Verify site
-        # Tolerated until DNS and the Caddy site block are in place.
+        # Tolerated until the Caddy site block is in place.
         run: |
           curl -fsS -o /dev/null -w 'site https=%{http_code}\n' https://stock.qianxue.online/ \
-            || echo "verify skipped: domain not wired up yet"
+            || echo "verify skipped: site not wired up yet"
