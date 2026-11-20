@@ -722,16 +722,22 @@ def compute_effective_region(
     """
     Compute effective market review region given config and open markets.
 
+    Crypto (``crypto``) is a 24/7 region: it is never gated by an exchange
+    calendar, so it stays in the result whenever it is explicitly requested,
+    even if every stock market is closed. ``both`` keeps its historical
+    six-stock-market meaning and does not imply crypto.
+
     Args:
-        config_region: From MARKET_REVIEW_REGION ('cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'both' or comma subset)
+        config_region: From MARKET_REVIEW_REGION ('cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'crypto' | 'both' or comma subset)
         open_markets: Markets open today
 
     Returns:
         None: caller uses config default (check disabled)
         '': all relevant markets closed, skip market review
-        'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'both': effective subset for today
+        'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw' | 'crypto' | 'both': effective subset for today
     """
     markets = ("cn", "hk", "us", "jp", "kr", "tw")
+    crypto_market = "crypto"
     normalized = (config_region or "cn").strip().lower()
     if not normalized:
         normalized = "cn"
@@ -742,23 +748,29 @@ def compute_effective_region(
     if not requested:
         requested = {"cn"}
 
+    # crypto must be requested explicitly; it is not part of the "both" alias.
+    wants_crypto = crypto_market in requested
+
     if "both" in requested:
         requested = set(markets)
     else:
         # Ignore invalid tokens and only keep known markets.
         requested = {item for item in requested if item in markets}
 
-    if not requested:
+    if not requested and not wants_crypto:
         # No valid market token left after filtering; follow parser fallback behavior.
         requested = {"cn"}
 
     # single explicit region: keep single-region return semantics (empty when closed)
-    if len(requested) == 1:
+    if len(requested) == 1 and not wants_crypto:
         region = next(iter(requested))
         return region if region in open_markets else ""
 
     # multi-region subset: keep only markets open today, in canonical order
     open_selected = [m for m in markets if m in requested and m in open_markets]
+    if wants_crypto:
+        # 24/7: no exchange calendar, always part of the run.
+        open_selected.append(crypto_market)
     if not open_selected:
         return ""
     if len(open_selected) == 1:

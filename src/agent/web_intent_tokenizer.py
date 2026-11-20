@@ -73,6 +73,11 @@ from src.agent.web_intent_types import (
     unknown_code_tag,
     wrong_code_tag,
 )
+from src.services.market_symbol_utils import (
+    CRYPTO_MARKET,
+    iter_crypto_chat_spans,
+    resolve_crypto_chat_symbol,
+)
 from src.services.name_to_code_resolver import (
     Stock,  # (code/name/market)
     US_stock_code_match,  # 美股代码匹配
@@ -557,6 +562,16 @@ _CODE_CANDIDATE_PATTERNS: List[Tuple[str, int]] = [
 ]
 
 
+def _crypto_stock(pair: str) -> Stock:
+    """Canonical crypto pair → ``Stock`` 三元组（market 用 ``crypto`` 字符串）。
+
+    不扩展 ``Market`` 枚举：交易对只在会话实体/工具入参里流动，市场枚举的
+    消费方（市场词消歧、API schema literal）不需要 crypto 成员，扩展会外溢
+    到既有股票语义与测试。
+    """
+    return Stock(code=pair, name=pair, market=CRYPTO_MARKET)
+
+
 def _split_by_codes(text: str) -> List[Token]:
     """Step 3 子函数：宽口径代码形字符串提取。
 
@@ -565,9 +580,21 @@ def _split_by_codes(text: str) -> List[Token]:
     token。只做形态匹配与最大连续合并，不校验合法性、不推断市场。
     不复用 extract_stock_codes：其首码白名单会丢弃 777777 这类非法代码，
     本函数保留供下游二次确认。
+
+    虚拟货币交易对（``BTC-USDT`` / ``BTCUSDT``）与中文别名（``比特币``）
+    在同层先行整体提取，直接产出已识别 ``stock_code``（canonical
+    ``BASE-QUOTE``），既不把交易对撕成 ``BTC`` + ``USDT`` 两个美股缺省代码，
+    也避免别名在 Step 5/6 被当普通文本丢弃。
     """
     if not text:
         return []
+
+    # 虚拟货币 span（交易对 + 中文别名）：整段识别，内部不再参与其它代码候选
+    crypto_spans = iter_crypto_chat_spans(text)
+    crypto_by_span = {(start, end): pair for start, end, pair in crypto_spans}
+    spans: List[Tuple[int, int]] = [
+        (start, end) for start, end, _pair in crypto_spans
+    ]
 
     # 阶段 1：正则独立扫描收集 span，重叠/嵌套交阶段 2 合并。两类放行保
     # 证不影响关键词语义：关键词池内纯 ASCII 词（"AI"/"PK" 大写也不作代码
@@ -578,7 +605,6 @@ def _split_by_codes(text: str) -> List[Token]:
         if _DIGIT_KEYWORDS_RE is not None
         else []
     )
-    spans: List[Tuple[int, int]] = []
     for pattern, flags in _CODE_CANDIDATE_PATTERNS:
         for m in re.finditer(pattern, text, flags):
             if m.group().upper() in _ASCII_KEYWORD_UPPER:
@@ -593,6 +619,9 @@ def _split_by_codes(text: str) -> List[Token]:
             ):
                 continue
             if any(ps <= m.start() and m.end() <= pe for ps, pe in digit_keyword_spans):
+                continue
+            # 落在虚拟货币 span 内的片段（"BTC-USDT" 的 BTC / USDT）不单独成码
+            if any(cs <= m.start() and m.end() <= ce for cs, ce, _p in crypto_spans):
                 continue
             spans.append((m.start(), m.end()))
 
@@ -610,7 +639,8 @@ def _split_by_codes(text: str) -> List[Token]:
         else:
             merged.append((s, e))
 
-    # 阶段 3：按合并后 span 切分：候选 → unknown_code；间隙 → 空 tag token
+    # 阶段 3：按合并后 span 切分：虚拟货币 → stock_code；候选 → unknown_code；
+    # 间隙 → 空 tag token
     tokens: List[Token] = []
     pos = 0
     for s, e in merged:
@@ -619,7 +649,10 @@ def _split_by_codes(text: str) -> List[Token]:
             if gap:
                 tokens.append(Token(gap))
         span_text = text[s:e]
-        if span_text.isdigit():
+        crypto_pair = crypto_by_span.get((s, e))
+        if crypto_pair is not None:
+            tokens.append(Token(span_text, TAG_STOCK_CODE, stocks=(_crypto_stock(crypto_pair),)))
+        elif span_text.isdigit():
             # 裸数字形态歧义（代码/指数/价格/年份/日期…）→ unknown_number，
             # 不进代码校验，交下游 LLM 辨析
             tokens.append(Token(span_text, TAG_UNKNOWN_NUMBER))
@@ -729,6 +762,13 @@ def _identify_one_code(t: Token) -> Token:
     未命中按该市场库全量与否细分 wrong/unknown。纯字母 → 美股 ticker 路径；
     无标注的防御形态走 extract 兜底（管道契约下 Step 3 不会产出该形态）。"""
     text = t.text
+
+    # 虚拟货币优先：交易对/中文别名/裸 base 资产（裸 base 需先排除本地库
+    # 中的同名美股 ticker，见 resolve_crypto_chat_symbol）。交易对与别名在
+    # Step 3 已整体识别，本支主要兜住 Step 3 之外的裸 base 形态（"BTC"）。
+    crypto_pair = resolve_crypto_chat_symbol(text, allow_bare_base=True)
+    if crypto_pair is not None:
+        return Token(crypto_pair, TAG_STOCK_CODE, stocks=(_crypto_stock(crypto_pair),))
 
     # 纯字母 → 美股 ticker：仅本地库命中才认可，未命中一律存疑交 LLM
     if not any(ch.isdigit() for ch in text):

@@ -22,6 +22,14 @@ import pandas as pd
 
 from src.agent.provider_trace import resolved_model_provider_identity
 from src.config import get_config
+from src.core.crypto_market_review import (
+    CryptoReviewData,
+    crypto_review_data_from_context,
+    load_crypto_review_data,
+    render_crypto_market_data_block,
+    render_crypto_prompt_requirements,
+    render_crypto_review_report,
+)
 from src.report_language import normalize_report_language
 from src.search_service import SearchService
 from src.core.market_profile import get_profile, MarketProfile
@@ -55,6 +63,16 @@ _CHINESE_SECTION_PATTERNS = {
     "sector_highlights": r"###\s*三、(?:板块主线|热点解读|板块表现)",
     "funds_sentiment": r"###\s*四、(?:资金与情绪|资金动向)",
     "news_catalysts": r"###\s*五、(?:消息催化|后市展望)",
+}
+
+# 虚拟货币复盘章节（24/7）：没有指数结构/板块，数据表注入挂在“主要交易对”下
+_CRYPTO_SECTION_PATTERNS_EN = {
+    "market_summary": r"###\s*(?:1\.\s*)?Market Summary",
+    "index_commentary": r"###\s*(?:2\.\s*)?(?:Major Pairs|Index Commentary)",
+}
+_CRYPTO_SECTION_PATTERNS_ZH = {
+    "market_summary": r"###\s*一、(?:盘面总览|市场总结)",
+    "index_commentary": r"###\s*二、(?:主要交易对|指数结构|指数点评)",
 }
 
 
@@ -109,6 +127,9 @@ class MarketOverview:
     top_concepts: List[Dict] = field(default_factory=list)    # 涨幅前5概念
     bottom_concepts: List[Dict] = field(default_factory=list) # 跌幅前5概念
 
+    # 虚拟货币专用上下文（24h ticker + 日线 + 数据可用性）；其它市场保持空
+    crypto_context: Dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class MarketLightReviewResult:
@@ -146,13 +167,14 @@ class MarketAnalyzer:
             search_service: 搜索服务实例
             analyzer: AI分析器实例（用于调用LLM）
             region: 市场区域 cn=A股 hk=港股 us=美股 jp=日本 kr=韩国 tw=台股
+                crypto=虚拟货币（24/7，Binance Vision）
             config: 本次复盘使用的配置；未传时读取全局配置
         """
         self.config = config or get_config()
         self.search_service = search_service
         self.analyzer = analyzer
         self.data_manager = DataFetcherManager()
-        self.region = region if region in ("cn", "us", "hk", "jp", "kr", "tw") else "cn"
+        self.region = region if region in ("cn", "us", "hk", "jp", "kr", "tw", "crypto") else "cn"
         self.profile: MarketProfile = get_profile(self.region)
         self.strategy = get_market_strategy_blueprint(self.region)
 
@@ -310,6 +332,12 @@ class MarketAnalyzer:
             return "Korea market" if review_language == "en" else "韩国市场"
         if self.region == "tw":
             return "Taiwan market" if review_language == "en" else "台股市场"
+        if self.region == "crypto":
+            return (
+                "virtual-currency (crypto) 24/7 market"
+                if review_language == "en"
+                else "虚拟货币（24/7）市场"
+            )
         if review_language == "en":
             return "A-share market"
         return "A股市场"
@@ -326,13 +354,15 @@ class MarketAnalyzer:
             return "KRW bn" if self._get_review_language() == "en" else "十亿韩元"
         if self.region == "tw":
             return "TWD bn" if self._get_review_language() == "en" else "十亿新台币"
+        if self.region == "crypto":
+            return "USDT bn" if self._get_review_language() == "en" else "十亿USDT"
         return "CNY 100m" if self._get_review_language() == "en" else "亿"
 
     def _format_turnover_value(self, amount_raw: float) -> str:
         """Format raw turnover according to market-specific units."""
         if amount_raw == 0.0:
             return "N/A"
-        if self.region in ("us", "hk", "jp", "kr", "tw"):
+        if self.region in ("us", "hk", "jp", "kr", "tw", "crypto"):
             return f"{amount_raw / 1e9:.2f}"
         if amount_raw > 1e6:
             return f"{amount_raw / 1e8:.0f}"
@@ -354,11 +384,14 @@ class MarketAnalyzer:
                 "jp": "Japan Market Recap",
                 "kr": "Korea Market Recap",
                 "tw": "Taiwan Market Recap",
+                "crypto": "Virtual-Currency (24/7) Market Recap",
             }
             market_name = market_names.get(self.region, "A-share Market Recap")
             return f"## {date} {market_name}"
         if self.region == "tw":
             return f"## {date} 台股大盘复盘"
+        if self.region == "crypto":
+            return f"## {date} 虚拟货币大盘复盘"
         return f"## {date} 大盘复盘"
 
     def _get_index_hint(self) -> str:
@@ -373,10 +406,38 @@ class MarketAnalyzer:
                 return "Analyze the key moves in the KOSPI, KOSDAQ, and other major Korean indices."
             if self.region == "tw":
                 return "Analyze TAIEX and the TPEx index; disclose missing indices without inferring their moves."
+            if self.region == "crypto":
+                return (
+                    "Analyze BTCUSDT and ETHUSDT 24h price action; crypto trades 24/7, so describe the "
+                    "rolling 24-hour window instead of an opening/closing session."
+                )
             return "Analyze the price action in the SSE, SZSE, ChiNext, and other major indices."
+        if self.region == "crypto":
+            return (
+                "分析 BTCUSDT、ETHUSDT 的 24 小时行情；加密市场 24/7 连续交易，描述滚动 24 小时窗口，"
+                "不要写成开盘/收盘"
+            )
         return self.profile.prompt_index_hint
 
     def _get_strategy_prompt_block(self) -> str:
+        if self.region == "crypto" and self._get_review_language() == "zh":
+            return """## 虚拟货币 24/7 复盘策略
+以 24 小时滚动窗口为“当日”，评估 BTC/ETH 主导的风险偏好，并给出可执行的仓位与风控框架。
+
+### 策略原则
+- 先看 BTC 与 ETH 的 24 小时方向是否一致，再判断市场处于进攻、震荡还是防守阶段。
+- 描述行情必须用“滚动 24 小时”，不存在开盘/收盘、也没有涨跌停与 T+1。
+- 只基于已提供的 24h ticker、日线和新闻判断；不臆造资金费率、未平仓、强平、链上指标、涨跌家数或板块榜。
+
+### 分析维度
+- 趋势结构：BTC/ETH 24h 涨跌幅、振幅与关键价位（区间上/下沿）是否被有效突破。
+- 资金与宏观：宏观流动性（美元、实际利率、美联储政策）、ETF/机构资金流与监管叙事。
+- 链上与叙事：只有在数据区给出具体数值时才引用链上指标与资金费率，否则只讨论逻辑不报数字。
+
+### 行动框架
+- 进攻：BTC/ETH 同向上行且量能配合，风险偏好回升。
+- 均衡：两者分化或区间震荡，降低杠杆与仓位，等待确认。
+- 防守：24h 明显回撤或外部流动性收紧，优先控制回撤并保留现金。"""
         if self.region == "tw" and self._get_review_language() == "en":
             return """## Strategy Blueprint: Taiwan Index and News Recap
 Assess Taiwan market risk from available TAIEX/TPEx index data and verified news.
@@ -524,6 +585,18 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _get_strategy_markdown_block(self, review_language: str | None = None) -> str:
         review_language = review_language or self._get_review_language()
+        if self.region == "crypto" and review_language == "zh":
+            return """### 六、策略框架
+- **趋势结构**：BTC/ETH 24 小时方向是否一致，关键区间是否被突破。
+- **资金与宏观**：宏观流动性、ETF/机构资金流与监管叙事（不编造具体数值）。
+- **数据边界**：24/7 无涨跌停、无北向资金、无龙虎榜；资金费率/未平仓/链上数据未提供时不报数字。
+"""
+        if self.region == "crypto" and review_language == "en":
+            return """### 6. Strategy Framework
+- **Trend Structure**: Are BTC/ETH 24h directions aligned, and are the key ranges broken.
+- **Flows & Macro**: Macro liquidity, ETF/institutional flows and regulation narrative (never invent figures).
+- **Data Limits**: 24/7 market, no price limits, no Northbound/Dragon-Tiger; no funding/open-interest/on-chain numbers when not provided.
+"""
         if self.region == "tw" and review_language == "en":
             return """### 6. Strategy Framework
 - **Index Structure**: Assess TAIEX/TPEx direction using available data; disclose missing coverage.
@@ -589,6 +662,9 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         Returns:
             MarketOverview: 市场概览数据对象
         """
+        if self.region == "crypto":
+            return self._get_crypto_market_overview()
+
         now = get_market_now("tw") if self.region == "tw" else datetime.now()
         today = now.strftime('%Y-%m-%d')
         overview = MarketOverview(date=today)
@@ -608,6 +684,42 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         # 4. 获取北向资金（可选）
         # self._get_north_flow(overview)
         
+        return overview
+
+    def _get_crypto_market_overview(self) -> MarketOverview:
+        """虚拟货币概览：只走 Binance Vision，无交易所日历与股票专属数据。
+
+        24/7 市场没有“今天是否开市”的概念，日期用市场本地（UTC）自然日。
+        抓取全程 fail-open：数据不可用时返回空 indices + ``crypto_context``
+        里的错误信息，由 generate_market_review 输出显式“暂无数据”小节。
+        """
+        crypto_data: CryptoReviewData = load_crypto_review_data()
+        now = get_market_now("crypto")
+        overview = MarketOverview(date=now.strftime('%Y-%m-%d'))
+        overview.crypto_context = crypto_data.to_context()
+        overview.indices = [
+            MarketIndex(
+                code=item['code'],
+                name=item['name'],
+                current=item['current'],
+                change=item['change'],
+                change_pct=item['change_pct'],
+                open=item['open'],
+                high=item['high'],
+                low=item['low'],
+                prev_close=item['prev_close'],
+                volume=item['volume'],
+                amount=item['amount'],
+                amplitude=item['amplitude'],
+            )
+            for item in overview.crypto_context.get("quotes", [])
+        ]
+        if not overview.indices:
+            logger.warning(
+                "[大盘] %s action=get_market_overview status=no_data errors=%s",
+                self._log_context(),
+                overview.crypto_context.get("errors", []),
+            )
         return overview
 
     
@@ -778,6 +890,7 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             "jp": "日本股市" if review_language == "zh" else "Japan stock market",
             "kr": "韩国股市" if review_language == "zh" else "Korea stock market",
             "tw": "台股市场" if review_language == "zh" else "Taiwan stock market",
+            "crypto": "加密货币市场" if review_language == "zh" else "crypto market",
         }
         
         try:
@@ -846,6 +959,15 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
                 self._log_context(),
             )
             return self._with_tw_index_coverage(self._generate_template_review(overview, news), overview)
+
+        # 虚拟货币无数据（Binance Vision 不可用）：直接输出显式“暂无数据”小节，
+        # 不调用 LLM（没有数据可分析，调用只会诱发编造）
+        if self.region == "crypto" and not overview.indices:
+            logger.warning(
+                "[大盘] %s action=generate_review status=fallback_template reason=crypto_no_data",
+                self._log_context(),
+            )
+            return self._generate_template_review(overview, news)
 
         # 构建 Prompt
         prompt = self._build_review_prompt(overview, news)
@@ -1193,6 +1315,12 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
             if self._get_review_language() == "en"
             else _CHINESE_SECTION_PATTERNS
         )
+        if self.region == "crypto":
+            patterns = (
+                _CRYPTO_SECTION_PATTERNS_EN
+                if self._get_review_language() == "en"
+                else _CRYPTO_SECTION_PATTERNS_ZH
+            )
 
         if stats_block:
             review = self._insert_after_section(
@@ -1411,6 +1539,28 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
         """构建指数行情表格"""
         if not overview.indices:
             return ""
+        if self.region == "crypto":
+            # 24/7：没有“指数”，第一列是交易对；成交额单位是 USDT
+            pair_label = "Pair" if self._get_review_language() == "en" else "交易对"
+            if self._get_review_language() == "en":
+                lines = [
+                    f"| {pair_label} | Last | Change % | 24h Open | 24h High | 24h Low | Amplitude | Quote Volume ({self._get_turnover_unit_label()}) |",
+                    "|------|------|----------|----------|----------|---------|-----------|-----------------|",
+                ]
+            else:
+                lines = [
+                    f"| {pair_label} | 最新 | 涨跌幅 | 24h 开盘 | 24h 最高 | 24h 最低 | 振幅 | 计价成交额({self._get_turnover_unit_label()}) |",
+                    "|------|------|--------|----------|----------|----------|------|-----------|",
+                ]
+            for idx in overview.indices:
+                arrow = self._get_index_change_arrow(idx.change_pct)
+                lines.append(
+                    f"| {idx.name} ({idx.code}) | {idx.current:.2f} | {arrow} {idx.change_pct:+.2f}% | "
+                    f"{self._format_optional_number(idx.open)} | {self._format_optional_number(idx.high)} | "
+                    f"{self._format_optional_number(idx.low)} | {self._format_optional_pct(idx.amplitude)} | "
+                    f"{self._format_turnover_value(idx.amount or 0.0)} |"
+                )
+            return "\n".join(lines)
         if self._get_review_language() == "en":
             lines = [
                 f"| Index | Last | Change % | Open | High | Low | Amplitude | Turnover ({self._get_turnover_unit_label()}) |",
@@ -1634,6 +1784,38 @@ Focus on index trend, liquidity, and sector rotation to shape the next-session t
 
     def _build_output_template_sections(self, review_language: str) -> str:
         """Build LLM output sections according to market data capabilities."""
+        if self.region == "crypto":
+            # 24/7 区域：无涨跌停/宽度/板块，输出结构按“资金费率与宏观 → 链上叙事
+            # → 风险 → 计划”组织，并显式声明数据边界
+            if review_language == "en":
+                return """### 3. Data Limits & Market Structure
+(State explicitly: 24/7 market, no limit-up/limit-down, no Northbound/Dragon-Tiger/margin data, no breadth or sector rankings. Do not fill missing data with estimates.)
+
+### 4. Flows & Macro
+(Analyze macro liquidity, ETF/institutional flow narrative and regulation. Use funding-rate framing only as reasoning; do not quote a funding rate, open interest or liquidation figure that is not in the data.)
+
+### 5. On-chain & Narratives
+(Use only on-chain metrics that appear in the data; otherwise discuss the narrative qualitatively and say the data is not provided.)
+
+### 6. Risk Alerts
+(List the main risks: volatility, liquidity, regulation, leverage/funding stress.)
+
+### 7. Strategy Plan
+(Provide an offensive/balanced/defensive stance, a position-sizing guideline, one invalidation trigger, and end with "For reference only, not investment advice.")"""
+            return """### 三、数据边界与市场结构
+（明确写出：24/7 连续交易、无涨停/跌停、无北向资金/龙虎榜/融资融券、无涨跌家数与板块榜；缺失数据不得用估算填补）
+
+### 四、资金费率与宏观
+（分析宏观流动性、ETF/机构资金流叙事与监管；资金费率只能作为推理框架，数据区未提供时不得给出具体资金费率、未平仓或强平数值）
+
+### 五、链上与叙事
+（只引用数据区给出的链上指标；没有就给定性叙事并说明“未提供数据”）
+
+### 六、风险提示
+（列出主要风险：波动、流动性、监管、杠杆/资金费率压力）
+
+### 七、交易计划
+（给出进攻/均衡/防守结论、仓位区间与一个触发失效条件；最后补充“建议仅供参考，不构成投资建议”。）"""
         if review_language == "en":
             if self.profile.has_market_stats and self.profile.has_sector_rankings:
                 return """### 3. Fund Flows
@@ -1834,11 +2016,71 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
         zh_report_title = f"{overview.date} 大盘复盘"
         if self.region in ("jp", "kr", "tw"):
             zh_report_title = f"{overview.date} {zh_market_scope_name}大盘复盘"
+        elif self.region == "crypto":
+            zh_report_title = f"{overview.date} 虚拟货币大盘复盘"
         workflow_hint = (
             "报告要像交易员盘后工作台：先给结论，再按数据表、主线、催化、计划展开"
             if self.profile.has_market_stats or self.profile.has_sector_rankings
             else "报告要像交易员盘后工作台：先给结论，再按指数、新闻催化和计划展开"
         )
+
+        # 虚拟货币：24/7 数据块 + 明确的市场边界要求（无涨跌停/北向/龙虎榜，
+        # 资金费率与链上只做推理不编造数值），指数占位符整体替换为加密数据块
+        indices_heading = "## Major Indices"
+        index_section_heading = "### 2. Index Commentary"
+        index_section_hint = self._get_index_hint()
+        if review_language != "en":
+            indices_heading = "## 主要指数"
+            index_section_heading = "### 二、指数结构"
+            index_section_hint = f"{self._get_index_hint()}，说明谁在护盘、谁在拖累，以及关键支撑/压力"
+        if self.region == "crypto":
+            indices_heading = (
+                "## Crypto Market Data (24/7)"
+                if review_language == "en"
+                else "## 虚拟货币市场数据（24/7）"
+            )
+            index_section_heading = (
+                "### 2. Major Pairs (24h)"
+                if review_language == "en"
+                else "### 二、主要交易对（24h）"
+            )
+            index_section_hint = (
+                self._get_index_hint()
+                + (
+                    "; cover the 24h range, key support/resistance and whether volume confirms the move"
+                    if review_language == "en"
+                    else "；说明 24 小时振幅、关键区间支撑/压力，以及量能是否配合"
+                )
+            )
+            # 数据块替换“指数”占位符，并把 24/7 边界与不可编造清单写进要求区
+            crypto_data = crypto_review_data_from_context(overview.crypto_context)
+            indices_placeholder = render_crypto_market_data_block(crypto_data, review_language)
+            data_no_indices_hint = ""
+            crypto_rules = render_crypto_prompt_requirements(review_language)
+            if review_language == "en":
+                data_boundary_requirement = (
+                    "- Respect Data Limits: do not invent or over-interpret unsupported data.\n"
+                    f"{crypto_rules}\n"
+                )
+                market_summary_hint = (
+                    "2-3 sentences summarizing the rolling 24h crypto tone: BTC/ETH alignment, "
+                    "volatility and quote volume, and the prevailing risk appetite."
+                )
+                workflow_hint = (
+                    "Report like a crypto trading desk: conclusion first, then the 24h data table, "
+                    "macro/flows framing, data limits and the plan"
+                )
+            else:
+                data_boundary_requirement = (
+                    "- 严格遵守数据边界：未提供的数据不要编造或过度解读。\n"
+                    f"{crypto_rules}\n"
+                )
+                market_summary_hint = (
+                    "2-3句话概括滚动 24 小时盘面：BTC/ETH 方向是否一致、波动与成交额、当前风险偏好"
+                )
+                workflow_hint = (
+                    "报告要像加密交易台：先给结论，再按 24 小时数据表、宏观/资金叙事、数据边界和计划展开"
+                )
 
         if review_language == "en":
             report_title = self._get_review_title(overview.date).removeprefix("## ").strip()
@@ -1859,7 +2101,7 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 ## Date
 {overview.date}
 
-## Major Indices
+{indices_heading}
 {indices_placeholder}
 
 {stats_block}
@@ -1884,8 +2126,8 @@ Concept lagging: {bottom_concepts_text if bottom_concepts_text else "N/A"}"""
 ### 1. Market Summary
 ({market_summary_hint})
 
-### 2. Index Commentary
-({self._get_index_hint()})
+{index_section_heading}
+({index_section_hint})
 
 {output_template_sections}
 
@@ -1913,7 +2155,7 @@ Output the report content directly, no extra commentary.
 ## 日期
 {overview.date}
 
-## 主要指数
+{indices_heading}
 {indices_placeholder}
 
 {stats_block}
@@ -1940,8 +2182,8 @@ Output the report content directly, no extra commentary.
 ### 一、盘面总览
 （{market_summary_hint}）
 
-### 二、指数结构
-（{self._get_index_hint()}，说明谁在护盘、谁在拖累，以及关键支撑/压力）
+{index_section_heading}
+（{index_section_hint}）
 
 {output_template_sections}
 
@@ -1952,6 +2194,15 @@ Output the report content directly, no extra commentary.
     
     def _generate_template_review(self, overview: MarketOverview, news: List) -> str:
         """使用模板生成复盘报告（无大模型时的备选方案）"""
+        if self.region == "crypto":
+            # 24/7 区域专用模板：数据可用时给行情表，不可用时给显式“暂无数据”小节
+            crypto_data = crypto_review_data_from_context(overview.crypto_context)
+            return render_crypto_review_report(
+                crypto_data,
+                date=overview.date,
+                language="en" if self._get_output_language() in {"en", "ko"} else "zh",
+            )
+
         template_language = self._get_template_review_language()
         mood_code = self.profile.mood_index_code
         # 根据 mood_index_code 查找对应指数

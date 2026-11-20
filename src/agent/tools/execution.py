@@ -18,6 +18,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Dict, Iterable, List, Optional
 
 from src.agent.tools.registry import ToolRegistry
+from src.services.market_symbol_utils import resolve_crypto_chat_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,12 @@ def _normalize_tool_stock_code(value: Any, registry: Optional[Any] = None) -> An
         except Exception:
             # Registry malformed/unavailable — fall through to the stock path.
             pass
+
+    # 虚拟货币：交易对/中文别名/裸 base 一律归一到 canonical BASE-QUOTE，与
+    # 意图层、股票范围层的代码身份保持一致；股票代码不命中该分支，行为不变
+    crypto_pair = resolve_crypto_chat_symbol(text, allow_bare_base=True)
+    if crypto_pair is not None:
+        return crypto_pair
 
     upper = text.upper()
     if upper.endswith(".HK"):

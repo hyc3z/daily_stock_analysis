@@ -5,9 +5,12 @@
 ===================================
 
 职责：
-1. 根据 MARKET_REVIEW_REGION 配置选择市场区域（cn / hk / us / jp / kr / tw / both）
+1. 根据 MARKET_REVIEW_REGION 配置选择市场区域（cn / hk / us / jp / kr / tw / crypto / both）
 2. 执行大盘复盘分析并生成复盘报告
 3. 保存和发送复盘报告
+
+``crypto`` 是 24/7 区域：不受交易所日历约束，数据只走 Binance Vision；该区域
+不可用时输出显式“暂无数据”小节，不影响同轮其它区域。
 """
 
 import logging
@@ -19,6 +22,7 @@ from typing import Any, Dict, Optional
 import uuid
 
 from src.config import get_config
+from src.core.crypto_market_review import render_crypto_no_data_report
 from src.notification import NotificationService
 from src.market_analyzer import MarketAnalyzer
 from src.report_language import normalize_report_language
@@ -32,7 +36,8 @@ from src.services.run_diagnostics import (
 )
 from src.schemas.market_light import MARKET_LIGHT_REGIONS
 from src.utils.market_review_region import (
-    MARKET_REVIEW_REGION_ORDER,
+    CRYPTO_MARKET_REVIEW_REGION,
+    MARKET_REVIEW_REGION_ORDER_WITH_CRYPTO,
     normalize_market_review_region_lenient,
 )
 
@@ -48,8 +53,9 @@ _MARKET_REVIEW_MARKETS = (
     ('jp', 'jp_title', '日股'),
     ('kr', 'kr_title', '韩股'),
     ('tw', 'tw_title', '台股'),
+    (CRYPTO_MARKET_REVIEW_REGION, 'crypto_title', '虚拟货币'),
 )
-_MARKET_REVIEW_REGION_ORDER = MARKET_REVIEW_REGION_ORDER
+_MARKET_REVIEW_REGION_ORDER = MARKET_REVIEW_REGION_ORDER_WITH_CRYPTO
 
 
 @dataclass
@@ -125,6 +131,7 @@ def _get_market_review_text(language: str) -> dict[str, str]:
             "jp_title": "# Japan Market Recap",
             "kr_title": "# Korea Market Recap",
             "tw_title": "# Taiwan Market Recap",
+            "crypto_title": "# Virtual-Currency (24/7) Market Recap",
             "separator": "> Next market recap follows",
         }
     if normalized == "ko":
@@ -137,6 +144,7 @@ def _get_market_review_text(language: str) -> dict[str, str]:
             "jp_title": "# 일본 시황 리뷰",
             "kr_title": "# 한국 시황 리뷰",
             "tw_title": "# 대만 시황 리뷰",
+            "crypto_title": "# 가상자산(24/7) 시황 리뷰",
             "separator": "> 다음 시장 시황 리뷰",
         }
     return {
@@ -148,6 +156,7 @@ def _get_market_review_text(language: str) -> dict[str, str]:
         "jp_title": "# 日股大盘复盘",
         "kr_title": "# 韩股大盘复盘",
         "tw_title": "# 台股大盘复盘",
+        "crypto_title": "# 虚拟货币（24/7）大盘复盘",
         "separator": "> 以下为下一市场大盘复盘",
     }
 
@@ -173,6 +182,51 @@ def _resolve_market_review_regions(raw_region: Optional[str]) -> list[str]:
 
     normalized = normalize_market_review_region_lenient(raw_region) or "cn"
     return normalized.split(",")
+
+
+def _run_region_review(
+    *,
+    region: str,
+    search_service: Optional[SearchService],
+    analyzer: Optional[GeminiAnalyzer],
+    config: object,
+    trigger_source: str,
+    query_id: str,
+) -> tuple[Optional[Any], str]:
+    """Run one region and return ``(review_result, report)``.
+
+    The crypto region is fail-open: a Binance Vision outage (or any unexpected
+    error) yields an explicit no-data section instead of raising, so a crypto
+    failure can never abort the other regions of the same run.
+    """
+
+    mkt_analyzer = MarketAnalyzer(
+        search_service=search_service,
+        analyzer=analyzer,
+        region=region,
+        config=config,
+    )
+    try:
+        review_result = mkt_analyzer.run_daily_review_with_snapshot()
+    except Exception as exc:
+        if region != CRYPTO_MARKET_REVIEW_REGION:
+            raise
+        logger.exception(
+            "[MarketReview] component=market_review action=crypto_review_failed "
+            "trigger_source=%s query_id=%s region=%s error=%s",
+            trigger_source,
+            query_id,
+            region,
+            exc,
+        )
+        language = normalize_report_language(getattr(config, "report_language", "zh"))
+        report = render_crypto_no_data_report(
+            date=datetime.now().strftime("%Y-%m-%d"),
+            language="en" if language == "en" else "zh",
+            errors=[str(exc)],
+        )
+        return None, report
+    return review_result, review_result.report
 
 
 def run_market_review(
@@ -242,14 +296,14 @@ def run_market_review(
                     mkt,
                     label,
                 )
-                mkt_analyzer = MarketAnalyzer(
+                review_result, mkt_report = _run_region_review(
+                    region=mkt,
                     search_service=search_service,
                     analyzer=analyzer,
-                    region=mkt,
                     config=runtime_config,
+                    trigger_source=trigger_source,
+                    query_id=history_query_id,
                 )
-                review_result = mkt_analyzer.run_daily_review_with_snapshot()
-                mkt_report = review_result.report
                 _collect_market_light_snapshot(
                     market_light_snapshots,
                     region=mkt,
@@ -280,14 +334,14 @@ def run_market_review(
                 run_region,
                 label,
             )
-            market_analyzer = MarketAnalyzer(
+            review_result, review_report = _run_region_review(
+                region=run_region,
                 search_service=search_service,
                 analyzer=analyzer,
-                region=run_region,
                 config=runtime_config,
+                trigger_source=trigger_source,
+                query_id=history_query_id,
             )
-            review_result = market_analyzer.run_daily_review_with_snapshot()
-            review_report = review_result.report
             market_light_snapshots = {}
             _collect_market_light_snapshot(
                 market_light_snapshots,

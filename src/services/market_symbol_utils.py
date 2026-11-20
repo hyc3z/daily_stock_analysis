@@ -14,6 +14,7 @@ Two symbol families live here:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Optional
 
@@ -237,3 +238,138 @@ def crypto_quote_currency(code: str) -> Optional[str]:
         return None
     base, quote = parts
     return "USD" if quote in CRYPTO_STABLECOIN_QUOTES else quote
+
+
+# ---------------------------------------------------------------------------
+# Chat-side crypto resolution: free-text pair spans + a small alias map.
+# ---------------------------------------------------------------------------
+# Chat input is prose, not a symbol field: users type "分析BTCUSDT",
+# "看看比特币走势" or "BTC 怎么样". These helpers let the intent layer and the
+# chat stock-scope layer claim those mentions *before* generic code/ticker
+# regexes shred them (``BTC-USDT`` used to become the two bogus US tickers
+# ``BTC`` + ``USDT``). They stay offline and deterministic: alias lookup plus
+# the same allowlists above, no provider calls.
+CRYPTO_DEFAULT_QUOTE = "USDT"
+
+# Intentionally tiny, human-maintained name -> base-asset map for Chinese chat
+# input. Add an entry only when users actually type the name; never generate it
+# mechanically from the base allowlist (unlisted names must stay unresolved
+# rather than resolve to an invented pair).
+CRYPTO_NAME_ALIASES: dict[str, str] = {
+    "比特币": "BTC",
+    "以太坊": "ETH",
+    "以太币": "ETH",
+    "狗狗币": "DOGE",
+    "索拉纳": "SOL",
+}
+
+_CRYPTO_ALIAS_RE = re.compile(
+    "|".join(
+        re.escape(name)
+        for name in sorted(CRYPTO_NAME_ALIASES, key=len, reverse=True)
+    )
+)
+# ASCII run that may carry a pair: ``BTCUSDT`` / ``BTC-USDT`` / ``eth-btc``.
+# Digit-leading runs are excluded on purpose: numeric stock codes are handled by
+# the existing code patterns and never form a crypto pair.
+_CRYPTO_RUN_RE = re.compile(
+    r"(?<![A-Za-z0-9])[A-Za-z][A-Za-z0-9]*(?:-[A-Za-z][A-Za-z0-9]*)*(?![A-Za-z0-9])"
+)
+
+
+def crypto_pair_from_base(base: str) -> Optional[str]:
+    """Return ``BASE-USDT`` for an allowlisted base asset, else ``None``."""
+
+    normalized = (base or "").strip().upper()
+    if normalized in _BASE_ASSET_SET:
+        return f"{normalized}-{CRYPTO_DEFAULT_QUOTE}"
+    return None
+
+
+def crypto_alias_pair(text: str) -> Optional[str]:
+    """Return the default pair of a documented Chinese alias (``比特币`` -> ``BTC-USDT``)."""
+
+    base = CRYPTO_NAME_ALIASES.get((text or "").strip())
+    return crypto_pair_from_base(base) if base else None
+
+
+def iter_crypto_pair_spans(text: str) -> list[tuple[int, int, str]]:
+    """Yield ``(start, end, canonical_pair)`` for allowlisted pairs inside ``text``."""
+
+    spans: list[tuple[int, int, str]] = []
+    for match in _CRYPTO_RUN_RE.finditer(text or ""):
+        pair = normalize_crypto_symbol(match.group())
+        if pair is not None:
+            spans.append((match.start(), match.end(), pair))
+    return spans
+
+
+def iter_crypto_alias_spans(text: str) -> list[tuple[int, int, str]]:
+    """Yield ``(start, end, canonical_pair)`` for documented Chinese aliases."""
+
+    spans: list[tuple[int, int, str]] = []
+    for match in _CRYPTO_ALIAS_RE.finditer(text or ""):
+        pair = crypto_alias_pair(match.group())
+        if pair is not None:
+            spans.append((match.start(), match.end(), pair))
+    return spans
+
+
+def iter_crypto_chat_spans(text: str) -> list[tuple[int, int, str]]:
+    """Yield every crypto mention span in chat text, ordered by position.
+
+    Combines pair-shaped runs and documented aliases. Overlaps are impossible by
+    construction (aliases are CJK, pair runs are ASCII), but the result is
+    sorted so callers can merge it with other span sources directly.
+    """
+
+    spans = iter_crypto_pair_spans(text) + iter_crypto_alias_spans(text)
+    spans.sort(key=lambda span: (span[0], span[1]))
+    return spans
+
+
+def _is_listed_stock_ticker(code: str) -> bool:
+    """True when a bare uppercase token is a real listed US ticker.
+
+    Imported lazily so this dependency-light module never forms an import cycle
+    with the resolver/stock-DB modules.
+    """
+
+    try:
+        from src.services.name_to_code_resolver import US_stock_code_match
+    except Exception:  # pragma: no cover - defensive, stock DB is always importable
+        return False
+    return bool(US_stock_code_match(code))
+
+
+def resolve_crypto_chat_symbol(
+    text: str,
+    *,
+    allow_bare_base: bool = False,
+) -> Optional[str]:
+    """Resolve one chat token/argument to the canonical ``BASE-QUOTE`` pair.
+
+    Resolution order: pair forms (``BTC-USDT`` / ``BTCUSDT``), documented
+    Chinese aliases, and — only when ``allow_bare_base`` is set — a bare
+    allowlisted base asset (``BTC`` -> ``BTC-USDT``). The bare-base branch is
+    gated on the local stock DB: a token that resolves to a listed ticker keeps
+    the existing stock path, so stock parsing is never weakened.
+    """
+
+    normalized = (text or "").strip()
+    if not normalized:
+        return None
+
+    pair = normalize_crypto_symbol(normalized)
+    if pair is not None:
+        return pair
+
+    alias_pair = crypto_alias_pair(normalized)
+    if alias_pair is not None:
+        return alias_pair
+
+    if allow_bare_base:
+        base = normalized.upper()
+        if base in _BASE_ASSET_SET and not _is_listed_stock_ticker(base):
+            return f"{base}-{CRYPTO_DEFAULT_QUOTE}"
+    return None

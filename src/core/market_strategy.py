@@ -258,6 +258,55 @@ TW_BLUEPRINT = MarketStrategyBlueprint(
 )
 
 
+CRYPTO_BLUEPRINT = MarketStrategyBlueprint(
+    region="crypto",
+    title="Crypto 24/7 Market Regime Strategy",
+    positioning=(
+        "Treat the rolling 24-hour window as the trading day: read BTC/ETH risk appetite "
+        "and translate it into a position/risk stance for a market with no close and no price limit."
+    ),
+    principles=[
+        "Crypto trades 24/7: describe rolling 24-hour changes, never an opening/closing session.",
+        "No daily price limit, no T+1, no Northbound flows, no Dragon-Tiger list and no limit-up boards.",
+        "Use only the supplied 24h tickers, daily klines and news; never invent funding rate, open interest, liquidation or on-chain figures.",
+    ],
+    dimensions=[
+        StrategyDimension(
+            name="Trend Structure",
+            objective="Classify BTC/ETH risk appetite from the rolling 24h move.",
+            checkpoints=[
+                "Are BTC and ETH 24h directions aligned",
+                "Has the 24h amplitude broken a key range",
+                "Does volume confirm the move",
+            ],
+        ),
+        StrategyDimension(
+            name="Flows & Macro",
+            objective="Map macro liquidity and institutional flows into crypto risk appetite.",
+            checkpoints=[
+                "USD/real yields and Fed policy narrative",
+                "ETF and institutional flow narrative",
+                "Regulation headlines and their direction",
+            ],
+        ),
+        StrategyDimension(
+            name="On-chain & Narratives",
+            objective="Frame on-chain and narrative angles without inventing numbers.",
+            checkpoints=[
+                "Only cite on-chain metrics that are actually provided",
+                "Distinguish spot from perpetuals; funding data is not supplied",
+                "Separate structural narrative from short-term noise",
+            ],
+        ),
+    ],
+    action_framework=[
+        "Risk-on: BTC and ETH aligned upward with volume confirmation.",
+        "Neutral: divergence or range-bound 24h action; reduce leverage and wait for confirmation.",
+        "Risk-off: sharp 24h drawdown or tightening macro liquidity; prioritize drawdown control.",
+    ],
+)
+
+
 def get_market_strategy_blueprint(region: str) -> MarketStrategyBlueprint:
     """Return strategy blueprint by market region."""
     if region == "us":
@@ -270,4 +319,6 @@ def get_market_strategy_blueprint(region: str) -> MarketStrategyBlueprint:
         return KR_BLUEPRINT
     if region == "tw":
         return TW_BLUEPRINT
+    if region == "crypto":
+        return CRYPTO_BLUEPRINT
     return CN_BLUEPRINT

@@ -7,6 +7,11 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
+from src.services.market_symbol_utils import (
+    iter_crypto_chat_spans,
+    resolve_crypto_chat_symbol,
+)
+
 
 SWITCH_CLEANUP_KEYS = {
     "stock_name",
@@ -191,6 +196,33 @@ def _append_candidate(
         candidates.append(normalized)
 
 
+# 裸 base 资产（"BTC"）：仅大写形态参与判定，与既有 ticker 路径的大小写口径
+# 一致（小写英文词不因撞上币种白名单被改判）
+_BARE_BASE_TOKEN_RE = re.compile(r"(?<![A-Za-z0-9])[A-Z]{2,8}(?![A-Za-z0-9])")
+
+
+def _crypto_candidate_spans(text: str) -> List[Tuple[int, int, str]]:
+    """整串虚拟货币提及 → ``(start, end, canonical_pair)``。
+
+    覆盖交易对（``BTC-USDT`` / ``BTCUSDT``）、文档化的中文别名（``比特币``），
+    以及本地库未登记的裸 base 资产（``BTC`` → ``BTC-USDT``，判定与白名单都
+    在 ``market_symbol_utils``，这里不复制）。``BTC-USDT`` 先整体认领，避免被
+    通用 ticker 正则撕成 ``BTC`` + ``USDT`` 两个美股缺省代码。
+    """
+    spans: List[Tuple[int, int, str]] = list(iter_crypto_chat_spans(text or ""))
+    covered = [(start, end) for start, end, _pair in spans]
+    for match in _BARE_BASE_TOKEN_RE.finditer(text or ""):
+        start, end = match.span()
+        if any(cs <= start and end <= ce for cs, ce in covered):
+            continue
+        pair = resolve_crypto_chat_symbol(match.group(), allow_bare_base=True)
+        if pair is not None:
+            spans.append((start, end, pair))
+            covered.append((start, end))
+    spans.sort(key=lambda span: (span[0], span[1]))
+    return spans
+
+
 def extract_stock_codes(text: str, registry: Optional[Any] = None) -> List[str]:
     """Extract candidates; no registry preserves the legacy stock-only path."""
     if not text:
@@ -209,7 +241,12 @@ def extract_stock_codes(text: str, registry: Optional[Any] = None) -> List[str]:
                 candidates.append(identity.stock_code)
         return candidates
 
+    crypto_spans = _crypto_candidate_spans(text)
+    crypto_covered = [(start, end) for start, end, _pair in crypto_spans]
+
     candidates: List[str] = []
+    for _start, _end, pair in crypto_spans:
+        _append_candidate(candidates, pair, text, registry)
 
     for pattern, flags in (
         (r"(?<![a-zA-Z])(?:SH|SZ|BJ)\d{6}(?!\d)", re.IGNORECASE),
@@ -220,6 +257,8 @@ def extract_stock_codes(text: str, registry: Optional[Any] = None) -> List[str]:
         (r"(?<![a-zA-Z.])([A-Z]{2,5}(?:\.[A-Z]{1,2})?)(?![a-zA-Z0-9])", 0),
     ):
         for match in re.finditer(pattern, text, flags):
+            if any(start <= match.start() and match.end() <= end for start, end in crypto_covered):
+                continue
             raw = match.group(1) if match.lastindex else match.group(0)
             _append_candidate(candidates, raw, text, registry)
 
@@ -230,6 +269,8 @@ def extract_stock_codes(text: str, registry: Optional[Any] = None) -> List[str]:
         or _CHOICE_COMPARE_PATTERN.search(text)
     ):
         for match in _LOWERCASE_TICKER_PATTERN.finditer(text):
+            if any(start <= match.start(1) and match.end(1) <= end for start, end in crypto_covered):
+                continue
             _append_candidate(candidates, match.group(1), text, registry)
 
     return candidates
@@ -244,7 +285,13 @@ def extract_stock_code_spans(text: str) -> List[tuple[int, int, str]]:
         r")(?![a-zA-Z0-9_.])", re.IGNORECASE,
     )
     ticker = re.compile(r"(?<![a-zA-Z0-9_.])(?:us)?[A-Z]{1,5}(?:\.[A-Z]{1,2})?(?![a-zA-Z0-9_.])")
-    matches = [(match.start(), match.end(), match.group()) for match in numeric.finditer(text or "")]
+    # 虚拟货币提及先于通用正则整串认领（span 内片段不再单独成码）
+    crypto_spans = _crypto_candidate_spans(text)
+    matches = list(crypto_spans)
+    for match in numeric.finditer(text or ""):
+        if any(start <= match.start() and match.end() <= end for start, end, _pair in crypto_spans):
+            continue
+        matches.append((match.start(), match.end(), match.group()))
     for match in ticker.finditer(text or ""):
         if not any(start <= match.start() and match.end() <= end for start, end, _token in matches):
             matches.append((match.start(), match.end(), match.group()))

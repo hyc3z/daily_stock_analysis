@@ -148,14 +148,15 @@ Portfolio 允许 JP/KR 账户、交易和持仓快照进入现有链路，但会
 
 回滚方式：移除 Portfolio snapshot 的 `data_quality` / `limitations` 扩展，恢复告警前端/后端对市场枚举的旧边界说明；如需整体回滚，移除 `jp/kr` 市场识别、交易日历注册、YFinance 路由扩展、Web/API 类型放行、`scripts/stock_index_seeds/` 日韩种子索引，并删除本文档中的能力声明。
 
-## 虚拟货币（加密货币）个股分析
+## 虚拟货币（加密货币）：个股分析、对话入口与 24/7 大盘复盘
 
-当前阶段支持把虚拟货币交易对写进自选股，进入既有个股分析主链路（日线抓取 → 技术指标 → 新闻/LLM → 报告 → 通知），复用既有策略与报告模板。股票（A 股/港股/美股/日韩台）行为不变：新增识别只覆盖「白名单 base + 白名单 quote」的交易对。
+当前阶段支持把虚拟货币交易对写进自选股，进入既有个股分析主链路（日线抓取 → 技术指标 → 新闻/LLM → 报告 → 通知），复用既有策略与报告模板；也支持在 Web Chat 里直接问某个币（交易对或中文别名），以及把 `crypto` 作为大盘复盘区域跑 24/7 复盘。股票（A 股/港股/美股/日韩台）行为不变：新增识别只覆盖「白名单 base + 白名单 quote」的交易对。
 
 支持格式（大小写不敏感，统一归一为 `BASE-QUOTE` 大写形式）：
 
 - 带分隔符：`BTC-USDT`、`ETH-USDC`、`ETH-BTC`
 - 不带分隔符：`BTCUSDT`、`btcusdt`
+- 中文别名（仅对话入口，映射刻意很小）：`比特币`→`BTC-USDT`、`以太坊`/`以太币`→`ETH-USDT`、`狗狗币`→`DOGE-USDT`、`索拉纳`→`SOL-USDT`；其它未列出的名称不会解析成交易对
 - base 白名单约 60 个主流资产（BTC/ETH/SOL/BNB/XRP/DOGE/ADA/TON/AVAX/LINK/DOT/TRX/LTC/BCH/SHIB/SUI/APT/ARB/OP/NEAR/ATOM/FIL/INJ/SEI/TIA/PEPE/WIF/UNI/AAVE/ETC/XLM/HBAR/ICP/RENDER/FET/AR/IMX/STX/GRT/THETA/ALGO/VET/SAND/MANA/AXS/EOS/FLOW/KSM/ONE/ZIL/IOTA/NEO/DASH/XMR/EGLD/WLD/ONDO/JUP/LDO/CRV/MKR …），quote 白名单为 `USDT/USDC/BUSD/FDUSD/USD/BTC/ETH`。
 - 定义与判定唯一真源：`src/services/market_symbol_utils.py`（`is_crypto_symbol` / `normalize_crypto_symbol` / `crypto_to_binance` / `crypto_to_yahoo`），API、数据源路由、市场上下文、交易日历与市场档案复用同一组函数。
 
@@ -181,12 +182,28 @@ Prompt / 市场语义：
 - `MARKET_EXCHANGE` 新增 `crypto` 哨兵值（`"24/7"`，没有交易所日历）、`MARKET_TIMEZONE` 新增 `crypto`（`UTC`）。`is_market_open` 对连续交易市场恒为 True，`infer_market_phase` 返回 `MarketPhase.INTRADAY`（连续开市阶段），`is_continuous_market()` 用于让所有日历查询跳过 `exchange-calendars`，避免把 crypto 当作「休市」。
 - 交易日过滤（`main.py::_compute_trading_day_filter`）不会因为 A 股/港股/美股休市而跳过 crypto 标的：`get_open_markets_today()` 始终包含 `crypto`。
 
+对话 / 意图入口（Web Chat）：
+
+- 交易对形态（`BTC-USDT` / `btc-usdt` / `BTCUSDT`）与中文别名（`比特币`→BTC、`以太坊`/`以太币`→ETH、`狗狗币`→DOGE、`索拉纳`→SOL）都会被识别为一个虚拟货币分析标的，不再拆成 `BTC` + `USDT` 两个美股缺省代码，也不会落进确认/拒绝链路。
+- 判定唯一真源仍在 `src/services/market_symbol_utils.py`：`CRYPTO_NAME_ALIASES`（**刻意保持很小**，只收用户真的会打的中文名，逐个人工添加）、`iter_crypto_chat_spans`（自由文本中的交易对 span）、`resolve_crypto_chat_symbol`（单 token/工具入参归一，可选的裸 base 形态带股票库排他守卫）。
+- 意图层：`web_intent_tokenizer` 在 Step 3 先整体认领交易对与别名并直接产出 `stock_code`（`Stock(code="BTC-USDT", market="crypto")`）；`web_intent_resolver` 的 LLM 兜底合并只在规则侧已认领该交易对时采信，绝不引入消息里不存在的标的。`Market` 枚举**未**新增 `crypto` 成员：交易对只在 `Stock.market` 字符串与会话实体里流动，市场枚举的消费方（市场词消歧、API schema literal、既有测试）不需要该字面量，加成员只会外溢到股票语义。
+- 股票解析不变：裸 `BTC`/`ADA` 这类 token 只有在本地股票库没有同名 ticker 时才按虚拟货币处理，`AAPL`/`600519`/`HK00700`/`茅台` 的解析路径与结果保持不变（`tests/test_crypto_chat_intent.py` 固化）。
+
+24/7 大盘复盘（`crypto` 区域）：
+
+- `MARKET_REVIEW_REGION` 现在接受 `crypto`（单值或逗号子集，如 `cn,crypto`），排序固定在 `cn,hk,us,jp,kr,tw` 之后。`both` 仍表示六个**股票**市场（`cn,hk,us,jp,kr,tw`），不含 crypto——升级后不会给既有 `both` 用户新增加密请求。
+- 调度：`compute_effective_region` 对显式请求的 crypto 不做交易日历门控，A 股/港股/美股全部休市时 crypto 复盘照常执行（`MARKET_REVIEW_REGION=crypto` 单跑，或 `cn,crypto` 在 A 股休市日退化为只跑 crypto）。
+- 数据只来自 Binance Vision：`BTCUSDT` / `ETHUSDT` 的 `/api/v3/ticker/24hr`（24 小时滚动行情）+ `/api/v3/klines`（近 8 天日线，取尾部 5 根做上下文）。不调用 AkShare/Tushare/Efinance/YFinance/Futu 等股票源，也不取板块、涨跌家数、涨停池。实现集中在 `src/core/crypto_market_review.py`，由 `MarketAnalyzer(region="crypto")` 消费。
+- Prompt 明确写出：这是 **24/7 连续交易**市场（没有开盘/收盘、没有涨跌停、不适用 T+1）；该市场**没有**涨跌停、北向/南向资金、龙虎榜、融资融券、涨跌家数与板块榜；可以用资金费率/宏观/链上逻辑做推理框架，但数据区没给的资金费率、未平仓、强平、链上数值**一律不得编造**，缺失时写“未提供数据”。
+- Fail-open：Binance Vision 不可用时，`crypto` 区域输出显式的“暂无数据”复盘小节（说明数据源不可用、缺失哪些数据、不做估算），不抛异常；`market_review.py` 对 crypto 区域额外加了一层兜底，单个区域异常不会中断同轮其它区域（其它市场仍保持原有的失败语义）。
+- 报告结构与股票市场不同：第一列是“交易对”，成交额单位是 USDT（十亿），没有指数/板块/Market Light（`MARKET_LIGHT_REGIONS` 仍为 cn/hk/us），策略段落换成“趋势结构 / 资金与宏观 / 链上与叙事”。
+
 边界（不承诺项）：
 
-- **未实现 24/7 大盘复盘**：`MARKET_REVIEW_REGION` 仍只接受 `cn/hk/us/jp/kr/tw`（含 `both`），`compute_effective_region` 会忽略 `crypto`，`src/utils/market_review_region.py`、`src/share_image.py`、`src/services/daily_market_context.py` 的市场枚举未扩展。
-- 未接入选股/筛选（`src/services/screening/`）、Portfolio 估值与汇率、DecisionSignal（`VALID_MARKETS` 不含 `crypto`，会记录一条 info 后跳过）、Market Light 告警（仍为 `cn/hk/us`）、数据能力矩阵（`src/services/data_capability_service.py` 未登记 crypto 源）、Web 大盘市场选择器。
-- 不提供现货/永续区分数据、资金费率、未平仓合约、强平、链上指标与加密专用新闻源；报告仅基于日线 + 实时报价 + 既有新闻检索。
-- 不承诺 Yahoo crypto 可用性：目标部署服务器上 `query1.finance.yahoo.com` 返回 HTTP 429（`YFRateLimitError`），本地一次手工 smoke 可正常返回 `BTC-USD` 日线与实时行情，因此实际可用性随网络环境变化；Yahoo 兜底只保证「限流/失败时抛 `DataSourceUnavailableError` 并降级，不崩链路」。
+- 不提供现货/永续区分数据、资金费率、未平仓合约、强平、链上指标与加密专用新闻源；报告仅基于 Binance Vision 的 24h ticker + 日线 + 既有新闻检索。
+- `DAILY_MARKET_CONTEXT_ENABLED` 的大盘环境摘要仍只归一 `cn/hk/us/jp/kr/tw`：`crypto` 区域暂不复用该摘要（`DailyMarketContextService` 会跳过并记录日志），不影响复盘本身。
+- 未接入选股/筛选（`src/services/screening/`）、Portfolio 估值与汇率、DecisionSignal（`VALID_MARKETS` 不含 `crypto`，会记录一条 info 后跳过）、Market Light 告警（仍为 `cn/hk/us`）、数据能力矩阵（`src/services/data_capability_service.py` 未登记 crypto 源）、分享图（`src/share_image.py`）的 crypto 市场标签。
+- 不承诺 Yahoo crypto 可用性：目标部署服务器上 `query1.finance.yahoo.com` 返回 HTTP 429（`YFRateLimitError`），本地一次手工 smoke 可正常返回 `BTC-USD` 日线与实时行情，因此实际可用性随网络环境变化；Yahoo 兜底只保证「限流/失败时抛 `DataSourceUnavailableError` 并降级，不崩链路」。大盘复盘不依赖 Yahoo（只用 Binance Vision）。
 - 前端 `apps/dsa-web/src/utils/validation.ts` 只做「交易对形态」校验（`BASE-QUOTE` / `BASEQUOTE`），base 白名单仍由后端裁决；前端改动未执行 `npm run lint` / `npm run build`（本机 `npm ci` 被 `EALLOWREMOTE` 拦截，无 `node_modules`）。
 
 可复现验证（离线）：
@@ -194,6 +211,7 @@ Prompt / 市场语义：
 ```bash
 python -m pytest -m "not network" tests/test_crypto_symbols.py tests/test_binance_vision_fetcher.py tests/test_market_context_crypto.py tests/test_yahoo_crypto_fetcher.py -q
 python -m pytest -m "not network" tests/test_stock_list_parser.py tests/test_trading_calendar.py tests/test_market_symbol_utils.py -q
+python -m pytest -m "not network" tests/test_crypto_chat_intent.py tests/test_crypto_market_review.py -q
 ```
 
-回滚方式：移除 `crypto` 符号识别（`market_symbol_utils` 的 crypto 段）、两个 crypto fetcher 及其在 `_DAILY_MARKET_FETCHER_SUPPORT`/`_init_default_fetchers`/路由中的注册、`detect_market` 的 crypto 分支与角色/指南、`CRYPTO_PROFILE`、交易日历的 crypto 注册，以及 API/前端 crypto 校验分支，并删除本节能力声明；不涉及数据库迁移。
+回滚方式：移除 `crypto` 符号识别（`market_symbol_utils` 的 crypto 段与 chat 解析辅助 `CRYPTO_NAME_ALIASES` / `iter_crypto_chat_spans` / `resolve_crypto_chat_symbol`）、两个 crypto fetcher 及其在 `_DAILY_MARKET_FETCHER_SUPPORT`/`_init_default_fetchers`/路由中的注册、`detect_market` 的 crypto 分支与角色/指南、`CRYPTO_PROFILE` 与 `CRYPTO_BLUEPRINT`、交易日历的 crypto 注册，以及 API/前端 crypto 校验分支；大盘复盘回滚只需把 `crypto` 从 `src/utils/market_review_region.py` 的合法集合与 `_MARKET_REVIEW_MARKETS` 移除并删除 `src/core/crypto_market_review.py`；对话入口回滚去掉 tokenizer/stock_scope/tool 三处 crypto 分支即可。不涉及数据库迁移。

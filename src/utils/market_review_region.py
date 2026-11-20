@@ -4,18 +4,28 @@
 from typing import Optional
 
 
+# Stock markets: canonical order, and the exact set expanded by ``both``.
+# ``both`` intentionally keeps its documented six-stock-market meaning so an
+# existing ``MARKET_REVIEW_REGION=both`` deployment does not start running a
+# crypto review (and its extra provider calls) after an upgrade.
 MARKET_REVIEW_REGION_ORDER = ("cn", "hk", "us", "jp", "kr", "tw")
-MARKET_REVIEW_REGION_SET = frozenset(MARKET_REVIEW_REGION_ORDER)
+# ``crypto`` is a 24/7 region: it must be requested explicitly (``crypto`` or a
+# comma subset such as ``cn,crypto``) and is always appended last so the
+# canonical order stays stable for the stock markets.
+CRYPTO_MARKET_REVIEW_REGION = "crypto"
+MARKET_REVIEW_REGION_ORDER_WITH_CRYPTO = (*MARKET_REVIEW_REGION_ORDER, CRYPTO_MARKET_REVIEW_REGION)
+MARKET_REVIEW_REGION_SET = frozenset(MARKET_REVIEW_REGION_ORDER_WITH_CRYPTO)
 MARKET_REVIEW_REGION_ALL = ",".join(MARKET_REVIEW_REGION_ORDER)
-MARKET_REVIEW_REGION_VALID_INPUTS = (*MARKET_REVIEW_REGION_ORDER, "both")
+MARKET_REVIEW_REGION_VALID_INPUTS = (*MARKET_REVIEW_REGION_ORDER_WITH_CRYPTO, "both")
 
 
 def normalize_market_review_region_lenient(value: Optional[str]) -> Optional[str]:
     """Normalize persistent config input while preserving legacy filtering.
 
     ``None`` and an empty string retain the historical ``cn`` default. Comma
-    lists keep only supported markets, and ``both`` expands to every market.
-    ``None`` is returned only when a non-defaultable value has no valid token.
+    lists keep only supported markets (``crypto`` included, ordered last), and
+    ``both`` expands to the six stock markets. ``None`` is returned only when a
+    non-defaultable value has no valid token.
     """
 
     normalized = str(value or "cn").strip().lower()
@@ -28,7 +38,7 @@ def normalize_market_review_region_lenient(value: Optional[str]) -> Optional[str
         requested = {token.strip() for token in normalized.split(",") if token.strip()}
         if "both" in requested:
             return MARKET_REVIEW_REGION_ALL
-        regions = [region for region in MARKET_REVIEW_REGION_ORDER if region in requested]
+        regions = [region for region in MARKET_REVIEW_REGION_ORDER_WITH_CRYPTO if region in requested]
         if regions:
             return ",".join(regions)
 
@@ -46,7 +56,7 @@ def normalize_market_review_region_strict(value: str) -> str:
     normalized = value.strip().lower()
     valid_hint = (
         f"{', '.join(MARKET_REVIEW_REGION_VALID_INPUTS)}，"
-        "或 cn/hk/us/jp/kr/tw 的合法逗号分隔组合"
+        "或 cn/hk/us/jp/kr/tw/crypto 的合法逗号分隔组合"
     )
     if not normalized:
         raise ValueError(f"region 不能为空；合法值：{valid_hint}")
@@ -67,4 +77,4 @@ def normalize_market_review_region_strict(value: str) -> str:
         return MARKET_REVIEW_REGION_ALL
 
     requested = set(tokens)
-    return ",".join(region for region in MARKET_REVIEW_REGION_ORDER if region in requested)
+    return ",".join(region for region in MARKET_REVIEW_REGION_ORDER_WITH_CRYPTO if region in requested)

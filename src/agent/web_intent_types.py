@@ -794,7 +794,10 @@ LLM_SYSTEM_PROMPT = """你是股票分析助手的意图分类器。把用户当
 - 板块/行业意图在 sectors 返回原文中的板块名（不要自行改写措辞）；
 - 提及的标的名若确定不是真实证券（如生造名"你好股份"），原文放入
   unresolved_names——不要为它编造代码，也不要静默忽略；
-- 不要编造代码：没有把握时 stock_code 返回 null 并降低该意图置信度。
+- 不要编造代码：没有把握时 stock_code 返回 null 并降低该意图置信度；
+- 虚拟货币交易对（"BTC-USDT"/"BTCUSDT"，或中文别名如"比特币"）按普通标的
+  判定意图：stock_code 返回规范 BASE-QUOTE 交易对（如 "BTC-USDT"），market
+  返回 null——它们不是 a/hk/us 任一股票市场。
 
 示例（输入＝user 消息的 JSON 载荷，输出＝要求的全量 JSON；代码一律规范
 拼写：A股 6 位裸数字、港股 HK+5 位、美股大写 ticker）：

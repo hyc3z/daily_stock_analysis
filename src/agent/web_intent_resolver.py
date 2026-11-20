@@ -116,6 +116,10 @@ from src.agent.web_intent_types import (
     is_unknown_code_tag, is_wrong_code_tag, normalize_intent_label,
     sector_dedup_key, unknown_code_tag,
 )
+from src.services.market_symbol_utils import (
+    CRYPTO_MARKET,
+    resolve_crypto_chat_symbol,
+)
 from src.services.name_to_code_resolver import Stock, lookup_stock_by_code
 
 logger = logging.getLogger("web_intent")
@@ -346,6 +350,12 @@ def _split_sub_messages(
         step = len(needle)
         if start < 0:  # canonical 改写代码：数字核回退（hk00700 / 00700.HK）
             needle = "".join(ch for ch in t.text if ch.isdigit())
+            step = len(needle)
+            start = low.find(needle, pos) if needle else -1
+        if start < 0 and "-" in t.text:
+            # 虚拟货币 canonical 改写（"BTC" → "BTC-USDT"）：退化用 base 资产
+            # 定位，同数字核回退——只为让切口落在原文正确位置
+            needle = t.text.split("-", 1)[0].lower()
             step = len(needle)
             start = low.find(needle, pos) if needle else -1
         cut = (start >= 0
@@ -1380,6 +1390,22 @@ def _merge_llm_result(
         if code in seen_codes:
             continue
         seen_codes.add(code)
+        # 虚拟货币交易对：stockDB 里没有 crypto 条目，按共享 allowlist 归一
+        # 后与股票同口径过采信闸门——只接受规则侧已在原文认领的交易对，避免
+        # LLM 引入消息里不存在的标的；认领过的交易对不再记入 unresolved
+        # （否则会误触发 stock_unresolved 确认）
+        crypto_code = resolve_crypto_chat_symbol(code, allow_bare_base=False)
+        if crypto_code is not None:
+            if crypto_code in claimable or any(s.code == crypto_code for s in stocks):
+                stocks = _dedup_stocks(
+                    stocks + [Stock(code=crypto_code, name=crypto_code, market=CRYPTO_MARKET)]
+                )
+            else:
+                logger.info(
+                    "LLM stock_code %s ignored: crypto pair not present in the message",
+                    raw,
+                )
+            continue
         in_candidates = [c for c in candidates if c.code == code]
         if in_candidates:
             # LLM 在歧义候选中做了选择：被选中组整体收敛，兄弟组保留交确认
